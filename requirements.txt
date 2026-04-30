@@ -1,0 +1,10 @@
+cityflow
+torch>=2.0
+numpy
+pandas
+matplotlib
+seaborn
+fastapi
+uvicorn[standard]
+pydantic
+pytest
