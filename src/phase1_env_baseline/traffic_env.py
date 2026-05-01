@@ -36,6 +36,7 @@ class TrafficEnv:
         self._flow = flow_path
         self.engine: "cityflow.Engine | Any | None" = None
         self._current_phases: dict[str, int] = {}
+        self._validate_phase_map()
 
     def reset(self) -> list[np.ndarray]:
         if cityflow is None:
@@ -46,7 +47,7 @@ class TrafficEnv:
         cfg = {
             "interval": 1.0,
             "seed": 0,
-            "dir": "./",
+            "dir": os.getcwd() + os.sep,
             "roadnetFile": self._roadnet,
             "flowFile": self._flow,
             "rlTrafficLight": True,
@@ -69,7 +70,11 @@ class TrafficEnv:
         return self._get_states()
 
     def step(self, actions: dict[str, int]):
+        if self.engine is None:
+            raise RuntimeError("reset() must be called before step()")
+
         for inter_id, phase in actions.items():
+            self._validate_action(inter_id, phase)
             self.engine.set_tl_phase(inter_id, phase)
             self._current_phases[inter_id] = phase
 
@@ -79,9 +84,11 @@ class TrafficEnv:
         states = self._get_states()
         rewards = self._get_rewards()
         done = self.engine.get_current_time() >= 3600
+        throughput_getter = getattr(self.engine, "get_finished_vehicle_count", None)
+        throughput = throughput_getter() if throughput_getter else self.engine.get_vehicle_count()
         info = {
-            "atl": self.engine.get_average_travel_time(),
-            "throughput": self.engine.get_vehicle_count(),
+            "atl": float(self.engine.get_average_travel_time()),
+            "throughput": float(throughput),
         }
         return states, rewards, done, info
 
@@ -113,11 +120,45 @@ class TrafficEnv:
             rewards.append(-float(pressure))
         return rewards
 
+    def _phase_state_dim(self, phases: list[list[tuple[str, str]]]) -> int:
+        n_movements = sum(len(movements) for movements in phases)
+        return 2 * n_movements + len(phases)
+
+    def _validate_phase_map(self) -> None:
+        if not self.phase_map:
+            raise ValueError("phase_map must contain at least one intersection")
+
+        expected_state_dim: int | None = None
+        expected_action_dim: int | None = None
+        for inter_id, phases in self.phase_map.items():
+            if not phases:
+                raise ValueError(f"intersection {inter_id!r} must have at least one phase")
+
+            state_dim = self._phase_state_dim(phases)
+            action_dim = len(phases)
+            if expected_state_dim is None:
+                expected_state_dim = state_dim
+                expected_action_dim = action_dim
+                continue
+
+            if state_dim != expected_state_dim or action_dim != expected_action_dim:
+                raise ValueError(
+                    "all intersections must share the same state and action dimensions"
+                )
+
+    def _validate_action(self, inter_id: str, phase: int) -> None:
+        if inter_id not in self.phase_map:
+            raise ValueError(f"unknown intersection id: {inter_id!r}")
+        if phase < 0 or phase >= len(self.phase_map[inter_id]):
+            raise ValueError(
+                f"invalid phase {phase} for intersection {inter_id!r}; "
+                f"expected 0..{len(self.phase_map[inter_id]) - 1}"
+            )
+
     @property
     def state_dim(self) -> int:
         phases = self.phase_map[self.inter_ids[0]]
-        n_movements = sum(len(movements) for movements in phases)
-        return 2 * n_movements + len(phases)
+        return self._phase_state_dim(phases)
 
     @property
     def action_dim(self) -> int:

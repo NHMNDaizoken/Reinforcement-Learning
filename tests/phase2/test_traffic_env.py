@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.env import TrafficEnv
+from src.phase1_env_baseline.traffic_env import TrafficEnv
 
 
 PHASE_MAP = {
@@ -62,3 +62,35 @@ def test_state_shape_matches_state_dim():
     env = _mock_env({"i0": 0, "i1": 0}, counts)
     states = env._get_states()
     assert all(state.shape == (env.state_dim,) for state in states)
+
+
+def test_init_rejects_mismatched_intersection_dimensions():
+    phase_map = {
+        "i0": [[("in_A", "out_A")], [("in_B", "out_B")]],
+        "i1": [[("in_C", "out_C")]],
+    }
+
+    with pytest.raises(ValueError, match="same state and action dimensions"):
+        TrafficEnv("roadnet.json", "flow.json", phase_map)
+
+
+def test_step_rejects_invalid_phase_before_simulation():
+    env = _mock_env({"i0": 0, "i1": 0}, {})
+    env.sim_steps_per_action = 1
+
+    with pytest.raises(ValueError, match="invalid phase"):
+        env.step({"i0": 2})
+
+    env.engine.set_tl_phase.assert_not_called()
+    env.engine.next_step.assert_not_called()
+
+
+def test_step_rejects_unknown_intersection_before_simulation():
+    env = _mock_env({"i0": 0, "i1": 0}, {})
+    env.sim_steps_per_action = 1
+
+    with pytest.raises(ValueError, match="unknown intersection"):
+        env.step({"missing": 0})
+
+    env.engine.set_tl_phase.assert_not_called()
+    env.engine.next_step.assert_not_called()
