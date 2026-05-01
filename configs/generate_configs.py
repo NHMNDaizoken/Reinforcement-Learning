@@ -24,6 +24,10 @@ def node(row: int, col: int) -> str:
     return f"node_{row}_{col}"
 
 
+def virtual_node(side: str, index: int) -> str:
+    return f"virtual_{side}_{index}"
+
+
 def road(src: str, dst: str) -> str:
     return f"road_{src}_{dst}"
 
@@ -32,28 +36,33 @@ def point(row: int, col: int) -> dict[str, int]:
     return {"x": col * ROAD_LEN, "y": row * ROAD_LEN}
 
 
-def parse_node(node_id: str) -> tuple[int, int]:
-    _, row, col = node_id.split("_")
-    return int(row), int(col)
-
-
 def build_roadnet(n: int = GRID_N) -> dict:
     intersections = []
     roads = []
-    node_roads: dict[str, list[str]] = {
-        node(row, col): [] for row, col in itertools.product(range(n), range(n))
-    }
+    positions: dict[tuple[int, int], tuple[str, bool]] = {}
 
-    def add_road(src: str, dst: str) -> None:
+    for row, col in itertools.product(range(n), range(n)):
+        positions[(row, col)] = (node(row, col), False)
+    for row in range(n):
+        positions[(row, -1)] = (virtual_node("west", row), True)
+        positions[(row, n)] = (virtual_node("east", row), True)
+    for col in range(n):
+        positions[(-1, col)] = (virtual_node("north", col), True)
+        positions[(n, col)] = (virtual_node("south", col), True)
+
+    node_roads: dict[str, list[str]] = {node_id: [] for node_id, _ in positions.values()}
+
+    def node_at(row: int, col: int) -> str:
+        return positions[(row, col)][0]
+
+    def add_road(src: str, dst: str, src_pos: tuple[int, int], dst_pos: tuple[int, int]) -> None:
         rid = road(src, dst)
-        src_row, src_col = parse_node(src)
-        dst_row, dst_col = parse_node(dst)
         roads.append(
             {
                 "id": rid,
                 "startIntersection": src,
                 "endIntersection": dst,
-                "points": [point(src_row, src_col), point(dst_row, dst_col)],
+                "points": [point(*src_pos), point(*dst_pos)],
                 "lanes": [
                     {"width": LANE_WIDTH, "maxSpeed": MAX_SPEED}
                     for _ in range(LANES)
@@ -64,20 +73,51 @@ def build_roadnet(n: int = GRID_N) -> dict:
         node_roads[dst].append(rid)
 
     for row, col in itertools.product(range(n), range(n)):
-        if col + 1 < n:
-            add_road(node(row, col), node(row, col + 1))
-            add_road(node(row, col + 1), node(row, col))
-        if row + 1 < n:
-            add_road(node(row, col), node(row + 1, col))
-            add_road(node(row + 1, col), node(row, col))
+        for dst_pos in [(row, col + 1), (row + 1, col)]:
+            if dst_pos not in positions:
+                continue
+            src_pos = (row, col)
+            src = node_at(*src_pos)
+            dst = node_at(*dst_pos)
+            add_road(src, dst, src_pos, dst_pos)
+            add_road(dst, src, dst_pos, src_pos)
+        if col == 0:
+            src_pos = (row, -1)
+            dst_pos = (row, col)
+            add_road(node_at(*src_pos), node_at(*dst_pos), src_pos, dst_pos)
+            add_road(node_at(*dst_pos), node_at(*src_pos), dst_pos, src_pos)
+        if row == 0:
+            src_pos = (-1, col)
+            dst_pos = (row, col)
+            add_road(node_at(*src_pos), node_at(*dst_pos), src_pos, dst_pos)
+            add_road(node_at(*dst_pos), node_at(*src_pos), dst_pos, src_pos)
 
     road_by_pair = {
         (item["startIntersection"], item["endIntersection"]): item["id"]
         for item in roads
     }
 
-    for row, col in itertools.product(range(n), range(n)):
-        nid = node(row, col)
+    for (row, col), (nid, is_virtual) in positions.items():
+        if is_virtual:
+            intersections.append(
+                {
+                    "id": nid,
+                    "point": point(row, col),
+                    "width": 0,
+                    "roads": node_roads[nid],
+                    "roadLinks": [],
+                    "trafficLight": {
+                        "roadLinkIndices": [],
+                        "lightphases": [
+                            {"time": 30, "availableRoadLinks": []},
+                            {"time": 30, "availableRoadLinks": []},
+                        ],
+                    },
+                    "virtual": True,
+                }
+            )
+            continue
+
         road_links = []
         phase_0 = []
         phase_1 = []
@@ -88,17 +128,8 @@ def build_roadnet(n: int = GRID_N) -> dict:
             ((row + 1, col), (row - 1, col), phase_1),
         ]
         for src_pos, dst_pos, phase_bucket in straight_pairs:
-            src_row, src_col = src_pos
-            dst_row, dst_col = dst_pos
-            if not (
-                0 <= src_row < n
-                and 0 <= src_col < n
-                and 0 <= dst_row < n
-                and 0 <= dst_col < n
-            ):
-                continue
-            start_road = road_by_pair[(node(src_row, src_col), nid)]
-            end_road = road_by_pair[(nid, node(dst_row, dst_col))]
+            start_road = road_by_pair[(node_at(*src_pos), nid)]
+            end_road = road_by_pair[(nid, node_at(*dst_pos))]
             phase_bucket.append(len(road_links))
             road_links.append(
                 {
@@ -138,7 +169,6 @@ def build_roadnet(n: int = GRID_N) -> dict:
 
 
 def build_flow(vph: int) -> list[dict]:
-    interval = 3600 / vph
     base_vehicle = {
         "length": 5.0,
         "width": 2.0,
@@ -152,28 +182,51 @@ def build_flow(vph: int) -> list[dict]:
     }
     n = GRID_N
     routes = [
-        [road(node(row, col), node(row, col + 1)) for col in range(n - 1)]
+        [road(virtual_node("west", row), node(row, 0))]
+        + [road(node(row, col), node(row, col + 1)) for col in range(n - 1)]
+        + [road(node(row, n - 1), virtual_node("east", row))]
         for row in range(n)
     ] + [
-        [road(node(row, col + 1), node(row, col)) for col in range(n - 2, -1, -1)]
+        [road(virtual_node("east", row), node(row, n - 1))]
+        + [road(node(row, col + 1), node(row, col)) for col in range(n - 2, -1, -1)]
+        + [road(node(row, 0), virtual_node("west", row))]
         for row in range(n)
     ] + [
-        [road(node(row, col), node(row + 1, col)) for row in range(n - 1)]
+        [road(virtual_node("north", col), node(0, col))]
+        + [road(node(row, col), node(row + 1, col)) for row in range(n - 1)]
+        + [road(node(n - 1, col), virtual_node("south", col))]
         for col in range(n)
     ] + [
-        [road(node(row + 1, col), node(row, col)) for row in range(n - 2, -1, -1)]
+        [road(virtual_node("south", col), node(n - 1, col))]
+        + [road(node(row + 1, col), node(row, col)) for row in range(n - 2, -1, -1)]
+        + [road(node(0, col), virtual_node("north", col))]
         for col in range(n)
+    ]
+
+    weighted_routes = [
+        (routes[0], 0.16),
+        (routes[1], 0.08),
+        (routes[2], 0.14),
+        (routes[3], 0.06),
+        (routes[4], 0.12),
+        (routes[5], 0.07),
+        (routes[6], 0.10),
+        (routes[7], 0.05),
+        (routes[8], 0.09),
+        (routes[9], 0.04),
+        (routes[10], 0.06),
+        (routes[11], 0.03),
     ]
 
     return [
         {
             "vehicle": base_vehicle,
             "route": route,
-            "interval": interval,
+            "interval": 3600 / max(1, round(vph * weight)),
             "startTime": 0,
             "endTime": 3600,
         }
-        for route in routes[:4]
+        for route, weight in weighted_routes
     ]
 
 
@@ -187,4 +240,4 @@ if __name__ == "__main__":
         (OUT_DIR / f"flow_{label}.json").write_text(
             json.dumps(flow, indent=2), encoding="utf-8"
         )
-        print(f"flow_{label}.json generated ({vph} veh/h, interval={3600 / vph:.1f}s)")
+        print(f"flow_{label}.json generated (~{vph} veh/h total)")

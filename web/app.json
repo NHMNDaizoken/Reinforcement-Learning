@@ -1,0 +1,9 @@
+{
+  "expo": {
+    "name": "BTCK Traffic Dashboard",
+    "slug": "btck-traffic-dashboard",
+    "version": "0.1.0",
+    "orientation": "default",
+    "platforms": ["ios", "android", "web"]
+  }
+}

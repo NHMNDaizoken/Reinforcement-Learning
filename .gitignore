@@ -1,4 +1,48 @@
-.pytest_cache/
-.uv-cache/
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+.venv-win/
+venv/
+env/
+
+# uv
+.uv-cache/
+
+# Tests / temp
+.pytest_cache/
+.agent_tmp/
+.tmp/
+pytest_tmp_*/
+
+# Generated data (large, reproducible)
+data/*.csv
+data/*.db
+models/*.pth
+analysis/*.png
+
+# Web
+web/node_modules/
+web/.expo/
+web/expo.*.log
+web/dist/
+
+# Claude Code (private agent config)
+CLAUDE.md
+.claude/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
