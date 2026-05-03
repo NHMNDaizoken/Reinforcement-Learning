@@ -5,15 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import sys
 from pathlib import Path
+
+import numpy as np
+import torch
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.phase1_env_baseline.max_pressure import MaxPressureBaseline, _write_cityflow_config, cityflow
 from src.phase1_env_baseline.phase_map import build_phase_map
+from src.phase2_dqn.dqn_agent import SharedDQNAgent
+from src.phase1_env_baseline.traffic_env import TrafficEnv
 
 
 def _agent_position(agent_id: str) -> tuple[int, int]:
@@ -37,7 +41,7 @@ def _vehicle_xy(
     distance: float,
     road_map: dict[str, dict],
     canvas_size: int = 820,
-) -> tuple[float, float] | None:
+) -> tuple[float, float, float] | None:
     road_id = lane_id.rsplit("_", 1)[0]
     road = road_map.get(road_id)
     if road is None:
@@ -51,6 +55,8 @@ def _vehicle_xy(
     world_x = float(start["x"]) + dx * ratio
     world_y = float(start["y"]) + dy * ratio
 
+    angle = math.degrees(math.atan2(dy, dx))
+
     lane_index = int(lane_id.rsplit("_", 1)[1])
     offset = (lane_index - 1) * 5.0
     normal_x = -dy / length
@@ -62,7 +68,19 @@ def _vehicle_xy(
     scale = (canvas_size - 2 * margin) / 600
     screen_x = margin + world_x * scale
     screen_y = margin + world_y * scale
-    return screen_x, screen_y
+    return screen_x, screen_y, angle
+
+
+def _vehicle_type(vehicle_id: str) -> str:
+    try:
+        num = int("".join(filter(str.isdigit, vehicle_id)) or "1")
+    except ValueError:
+        num = 1
+    if num % 5 == 0:
+        return "bus"
+    if num % 2 == 0:
+        return "motorbike"
+    return "car"
 
 
 def _snapshot_vehicles(engine, road_map: dict[str, dict], max_vehicles: int = 240) -> list[dict]:
@@ -72,20 +90,38 @@ def _snapshot_vehicles(engine, road_map: dict[str, dict], max_vehicles: int = 24
     vehicles = []
     for lane_id, vehicle_ids in sorted(lane_vehicles.items()):
         for vehicle_id in vehicle_ids:
-            xy = _vehicle_xy(lane_id, float(distances.get(vehicle_id, 0.0)), road_map)
-            if xy is None:
+            result = _vehicle_xy(lane_id, float(distances.get(vehicle_id, 0.0)), road_map)
+            if result is None:
                 continue
-            vehicles.append(
-                {
-                    "id": vehicle_id,
-                    "x": round(xy[0], 1),
-                    "y": round(xy[1], 1),
-                    "waiting": float(speeds.get(vehicle_id, 0.0)) < 0.1,
-                }
-            )
+            screen_x, screen_y, angle = result
+            vehicles.append({
+                "id": vehicle_id,
+                "x": round(screen_x, 1),
+                "y": round(screen_y, 1),
+                "angle": round(angle, 1),
+                "type": _vehicle_type(vehicle_id),
+                "waiting": float(speeds.get(vehicle_id, 0.0)) < 0.1,
+            })
             if len(vehicles) >= max_vehicles:
                 return vehicles
     return vehicles
+
+
+def _load_dqn_model(agent: SharedDQNAgent, model_path: str) -> bool:
+    """Load trained DQN model weights. Returns True if successful."""
+    path = Path(model_path)
+    if not path.exists():
+        print(f"Model file not found: {model_path}")
+        return False
+    try:
+        state_dict = torch.load(str(path), map_location="cpu")
+        agent.q_network.load_state_dict(state_dict)
+        agent.q_network.eval()
+        print(f"DQN model loaded from {model_path}")
+        return True
+    except Exception as exc:
+        print(f"Failed to load model: {exc}")
+        return False
 
 
 def export_replay_data(
@@ -95,69 +131,102 @@ def export_replay_data(
     action_interval: int,
     output_path: str,
     algorithm: str = "baseline",
+    model_path: str = "models/best.pth",
 ) -> None:
     if cityflow is None:
         raise RuntimeError("cityflow is required to export replay data")
-    if algorithm != "baseline":
-        raise NotImplementedError(
-            "Model replay export requires trained model evaluation data first."
-        )
 
     phase_map = build_phase_map(roadnet_path)
     road_map = _load_roads(roadnet_path)
-    engine = cityflow.Engine(_write_cityflow_config(roadnet_path, flow_path), thread_num=1)
-    controller = MaxPressureBaseline(engine, phase_map)
-    current_actions = {agent_id: 0 for agent_id in phase_map}
     frames = []
 
-    for elapsed in range(steps):
-        if elapsed % action_interval == 0:
-            current_actions = controller.select_actions()
-            for agent_id, action in current_actions.items():
-                engine.set_tl_phase(agent_id, action)
+    # ── BASELINE (MaxPressure) ──────────────────────────────────────────────
+    if algorithm == "baseline":
+        engine = cityflow.Engine(_write_cityflow_config(roadnet_path, flow_path), thread_num=1)
+        controller = MaxPressureBaseline(engine, phase_map)
+        current_actions = {agent_id: 0 for agent_id in phase_map}
 
-        counts = engine.get_lane_vehicle_count()
-        agents = []
-        total_queue = 0
-        for agent_id in sorted(phase_map):
-            row, col = _agent_position(agent_id)
-            queue = _queue_for_agent(counts, phase_map[agent_id])
-            pressures = MaxPressureBaseline.phase_pressures(counts, phase_map[agent_id])
-            action = int(current_actions[agent_id])
-            total_queue += queue
-            agents.append(
-                {
-                    "id": agent_id,
-                    "row": row,
-                    "col": col,
-                    "action": action,
-                    "queue": queue,
-                    "phase_pressures": pressures,
-                    "selected_pressure": pressures[action],
-                }
-            )
+        for elapsed in range(steps):
+            if elapsed % action_interval == 0:
+                current_actions = controller.select_actions()
+                for agent_id, action in current_actions.items():
+                    engine.set_tl_phase(agent_id, action)
 
-        throughput_getter = getattr(engine, "get_finished_vehicle_count", None)
-        throughput = throughput_getter() if throughput_getter else engine.get_vehicle_count()
-        frames.append(
-            {
+            counts = engine.get_lane_vehicle_count()
+            agents, total_queue = _build_agents(counts, phase_map, current_actions)
+            throughput = _get_throughput(engine)
+
+            frames.append({
                 "time": float(engine.get_current_time()),
                 "atl": float(engine.get_average_travel_time()),
                 "throughput": int(throughput),
                 "total_queue": total_queue,
                 "agents": agents,
                 "vehicles": _snapshot_vehicles(engine, road_map),
-            }
+            })
+            engine.next_step()
+
+        algorithm_label = "Baseline — MaxPressure Actuated Control"
+
+    # ── DQN MODEL ───────────────────────────────────────────────────────────
+    elif algorithm == "model":
+        env = TrafficEnv(
+            roadnet_path=roadnet_path,
+            flow_path=flow_path,
+            phase_map=phase_map,
+            sim_steps_per_action=action_interval,
         )
-        engine.next_step()
+        agent = SharedDQNAgent(state_dim=env.state_dim, action_dim=env.action_dim)
+        loaded = _load_dqn_model(agent, model_path)
+        if not loaded:
+            raise RuntimeError(f"Cannot load DQN model from {model_path}")
+
+        states = env.reset()
+        # FIX: dùng env.engine thay vì tạo engine riêng
+        engine = env.engine
+        current_actions = {agent_id: 0 for agent_id in env.inter_ids}
+
+        for elapsed in range(steps):
+            if elapsed % action_interval == 0:
+                action_values = agent.select_actions(states, training=False)
+                current_actions = {
+                    agent_id: int(action_values[idx])
+                    for idx, agent_id in enumerate(env.inter_ids)
+                }
+                next_states, _, done, info = env.step(current_actions)
+                # FIX: cập nhật engine reference sau mỗi step
+                engine = env.engine
+                states = next_states
+                if done:
+                    states = env.reset()
+                    engine = env.engine
+
+            counts = engine.get_lane_vehicle_count()
+            agents, total_queue = _build_agents(counts, phase_map, current_actions)
+            throughput = _get_throughput(engine)
+
+            frames.append({
+                "time": float(engine.get_current_time()),
+                "atl": float(engine.get_average_travel_time()),
+                "throughput": int(throughput),
+                "total_queue": total_queue,
+                "agents": agents,
+                "vehicles": _snapshot_vehicles(engine, road_map),
+            })
+            # FIX: KHÔNG gọi engine.next_step() vì TrafficEnv đã tự step
+
+        algorithm_label = "Trained DQN — Shared Q-Network (9 agents)"
+
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
 
     replay = {
         "roadnet": roadnet_path,
         "flow": flow_path,
         "traffic_level": Path(flow_path).stem.replace("flow_", ""),
         "algorithm": algorithm,
-        "algorithm_label": "Baseline - MaxPressure Actuated Control",
-        "available_algorithms": ["baseline"],
+        "algorithm_label": algorithm_label,
+        "available_algorithms": ["baseline", "model"],
         "steps": steps,
         "action_interval": action_interval,
         "frames": frames,
@@ -169,6 +238,36 @@ def export_replay_data(
     print(f"Frames: {len(frames)}")
 
 
+def _build_agents(
+    counts: dict[str, int],
+    phase_map: dict,
+    current_actions: dict[str, int],
+) -> tuple[list[dict], int]:
+    agents = []
+    total_queue = 0
+    for agent_id in sorted(phase_map):
+        row, col = _agent_position(agent_id)
+        queue = _queue_for_agent(counts, phase_map[agent_id])
+        pressures = MaxPressureBaseline.phase_pressures(counts, phase_map[agent_id])
+        action = int(current_actions.get(agent_id, 0))
+        total_queue += queue
+        agents.append({
+            "id": agent_id,
+            "row": row,
+            "col": col,
+            "action": action,
+            "queue": queue,
+            "phase_pressures": pressures,
+            "selected_pressure": pressures[action] if action < len(pressures) else 0,
+        })
+    return agents, total_queue
+
+
+def _get_throughput(engine) -> int:
+    getter = getattr(engine, "get_finished_vehicle_count", None)
+    return getter() if getter else engine.get_vehicle_count()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export replay data for the dashboard.")
     parser.add_argument("--roadnet", default="configs/roadnet.json")
@@ -177,6 +276,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--action-interval", type=int, default=10)
     parser.add_argument("--output", default="web/data/high.json")
+    parser.add_argument("--model-path", default="models/best.pth")
     args = parser.parse_args()
     export_replay_data(
         args.roadnet,
@@ -185,6 +285,7 @@ def main() -> None:
         args.action_interval,
         args.output,
         args.algorithm,
+        args.model_path,
     )
 
 
