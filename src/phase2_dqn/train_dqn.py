@@ -79,6 +79,14 @@ def train(
     model_output = Path(model_path)
     model_output.parent.mkdir(parents=True, exist_ok=True)
 
+    # ── NEW: per-episode training log (1 row/episode) ──────────────────────
+    training_log_path = csv_path.parent / "training_log.csv"
+    training_log_fields = ["episode", "reward", "atl", "throughput", "loss", "epsilon"]
+    training_log_file = training_log_path.open("w", newline="", encoding="utf-8")
+    training_log_writer = csv.DictWriter(training_log_file, fieldnames=training_log_fields)
+    training_log_writer.writeheader()
+    # ───────────────────────────────────────────────────────────────────────
+
     best_reward = float("-inf")
     last_loss = 0.0
     fieldnames = [
@@ -149,6 +157,18 @@ def train(
                 best_reward = episode_reward
                 torch.save(agent.q_network.state_dict(), model_output)
 
+            # ── NEW: ghi 1 dòng/episode vào training log ──────────────────
+            training_log_writer.writerow({
+                "episode": episode,
+                "reward": round(episode_reward, 4),
+                "atl": round(float(final_info.get("atl", 0.0)), 4),
+                "throughput": round(float(final_info.get("throughput", 0.0)), 1),
+                "loss": round(last_loss, 6),
+                "epsilon": round(agent.epsilon, 4),
+            })
+            training_log_file.flush()  # ghi ngay, không bị mất nếu crash
+            # ───────────────────────────────────────────────────────────────
+
             print(
                 "episode={episode} reward={reward:.3f} epsilon={epsilon:.4f} "
                 "loss={loss:.6f} atl={atl:.3f} throughput={throughput:.0f}".format(
@@ -161,6 +181,7 @@ def train(
                 )
             )
 
+    training_log_file.close()
     return {"best_reward": best_reward, "last_loss": last_loss}
 
 
