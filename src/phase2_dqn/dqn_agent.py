@@ -19,20 +19,17 @@ class DenseLayer(nn.Module):
 
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
-        # PyTorch convention: weight shape is (out, in) so matmul is W @ x^T
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.zeros(out_features))
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        # Kaiming uniform for ReLU activations; fan_in mode is correct for (out, in) layout
         nn.init.kaiming_uniform_(self.weight, nonlinearity="relu")
         fan_in = self.weight.shape[1]
         bound = 1.0 / fan_in**0.5
         nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        # inputs: (..., in_features) → (..., out_features)
         return inputs @ self.weight.t() + self.bias
 
 
@@ -60,7 +57,7 @@ class Transition(NamedTuple):
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int = 5000):
+    def __init__(self, capacity: int = 50000):  # FIX 1: 5000 → 50000
         self.capacity = capacity
         self._buffer: Deque[Transition] = deque(maxlen=capacity)
 
@@ -121,14 +118,14 @@ def huber_loss(
 class SharedDQNAgent:
     state_dim: int
     action_dim: int
-    learning_rate: float = 1e-3
+    learning_rate: float = 5e-4        # FIX 2: 1e-3 → 5e-4 (học ổn định hơn, không nhảy qua optima)
     gamma: float = 0.95
     epsilon: float = 1.0
-    epsilon_min: float = 0.01
-    epsilon_decay: float = 0.995
-    buffer_capacity: int = 5000
-    batch_size: int = 64
-    target_update_freq: int = 200
+    epsilon_min: float = 0.05          # FIX 3: 0.01 → 0.05 (giữ explore suốt quá trình train)
+    epsilon_decay: float = 0.9958      # FIX 4: 0.995 → 0.9995 (decay chậm hơn, xem giải thích bên dưới)
+    buffer_capacity: int = 50000       # FIX 5: 5000 → 50000 (nhớ nhiều tình huống đa dạng hơn)
+    batch_size: int = 256              # FIX 6: 64 → 256 (gradient ổn định hơn)
+    target_update_freq: int = 1000     # FIX 7: 200 → 1000 (Q-target ổn định hơn)
     huber_delta: float = 1.0
     grad_max_norm: float = 10.0
     device: str | torch.device = "cpu"
@@ -214,10 +211,8 @@ class SharedDQNAgent:
         next_state_tensor = to_tensor(next_states, torch.float32)
         done_tensor = to_tensor(dones, torch.float32)
 
-        # Q(s, a) for the taken action
         q_values = self.q_network(state_tensor).gather(1, action_tensor.unsqueeze(1)).squeeze(1)
 
-        # Bellman target using frozen target network
         with torch.no_grad():
             next_q_values = self.target_network(next_state_tensor).max(dim=1).values
             targets = reward_tensor + self.gamma * next_q_values * (1.0 - done_tensor)

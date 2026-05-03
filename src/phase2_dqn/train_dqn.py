@@ -79,13 +79,12 @@ def train(
     model_output = Path(model_path)
     model_output.parent.mkdir(parents=True, exist_ok=True)
 
-    # ── NEW: per-episode training log (1 row/episode) ──────────────────────
+    # per-episode training log (1 row/episode)
     training_log_path = csv_path.parent / "training_log.csv"
     training_log_fields = ["episode", "reward", "atl", "throughput", "loss", "epsilon"]
     training_log_file = training_log_path.open("w", newline="", encoding="utf-8")
     training_log_writer = csv.DictWriter(training_log_file, fieldnames=training_log_fields)
     training_log_writer.writeheader()
-    # ───────────────────────────────────────────────────────────────────────
 
     best_reward = float("-inf")
     last_loss = 0.0
@@ -132,7 +131,10 @@ def train(
                 loss = agent.update()
                 if loss is not None:
                     last_loss = float(loss)
-                agent.decay_epsilon()
+
+                # FIX 8: BỎ agent.decay_epsilon() ra khỏi vòng lặp step
+                # Trước: gọi 360 lần/episode → epsilon về min sau <1 episode
+                # Sau: gọi 1 lần/episode → decay đều qua 1000 episodes
 
                 writer.writerows(
                     _episode_rows(
@@ -153,11 +155,14 @@ def train(
                 if done:
                     break
 
+            # FIX 8 (tiếp): decay_epsilon() gọi đúng chỗ - 1 lần/episode
+            agent.decay_epsilon()
+
             if episode_reward > best_reward:
                 best_reward = episode_reward
                 torch.save(agent.q_network.state_dict(), model_output)
 
-            # ── NEW: ghi 1 dòng/episode vào training log ──────────────────
+            # ghi 1 dòng/episode vào training log
             training_log_writer.writerow({
                 "episode": episode,
                 "reward": round(episode_reward, 4),
@@ -166,8 +171,7 @@ def train(
                 "loss": round(last_loss, 6),
                 "epsilon": round(agent.epsilon, 4),
             })
-            training_log_file.flush()  # ghi ngay, không bị mất nếu crash
-            # ───────────────────────────────────────────────────────────────
+            training_log_file.flush()
 
             print(
                 "episode={episode} reward={reward:.3f} epsilon={epsilon:.4f} "
