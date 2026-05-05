@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -12,7 +13,6 @@ import numpy as np
 import torch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -58,7 +58,9 @@ def _episode_rows(
 
 def train(
     roadnet_path: str,
-    flow_path: str,
+    flows: list[str],
+    mode: str,
+    curriculum_interval: int,
     episodes: int,
     steps_per_episode: int,
     sim_steps_per_action: int,
@@ -66,12 +68,17 @@ def train(
     model_path: str,
 ) -> dict[str, float]:
     phase_map = build_phase_map(roadnet_path)
+    
+    # Khởi tạo env lần đầu với flow đầu tiên để agent có thể lấy state_dim và action_dim
+    current_flow_path = flows[0]
+    print(f"\n[INFO] Initializing Environment with flow: {current_flow_path}")
     env = TrafficEnv(
         roadnet_path=roadnet_path,
-        flow_path=flow_path,
+        flow_path=current_flow_path,
         phase_map=phase_map,
         sim_steps_per_action=sim_steps_per_action,
     )
+    
     agent = SharedDQNAgent(state_dim=env.state_dim, action_dim=env.action_dim)
 
     csv_path = Path(output_csv)
@@ -81,7 +88,7 @@ def train(
 
     # per-episode training log (1 row/episode)
     training_log_path = csv_path.parent / "training_log.csv"
-    training_log_fields = ["episode", "reward", "atl", "throughput", "loss", "epsilon"]
+    training_log_fields = ["episode", "flow_scenario", "reward", "atl", "throughput", "loss", "epsilon"]
     training_log_file = training_log_path.open("w", newline="", encoding="utf-8")
     training_log_writer = csv.DictWriter(training_log_file, fieldnames=training_log_fields)
     training_log_writer.writeheader()
@@ -106,6 +113,41 @@ def train(
         writer.writeheader()
 
         for episode in range(episodes):
+            
+            # --- LOGIC QUẢN LÝ FLOW (SOFT CURRICULUM / RANDOM) ---
+            if mode == "curriculum":
+                # 1. Xác định mức độ khó (phase) tối đa đã mở khóa
+                max_unlocked_idx = min(episode // curriculum_interval, len(flows) - 1)
+                
+                # 2. Áp dụng Soft Curriculum
+                if max_unlocked_idx == 0:
+                    flow_idx = 0  # Giai đoạn đầu, chỉ có 1 bài để học
+                else:
+                    # 75% học phase mới nhất, 25% tỷ lệ ôn lại ngẫu nhiên một bài cũ
+                    if random.random() < 0.75:
+                        flow_idx = max_unlocked_idx
+                    else:
+                        flow_idx = random.randint(0, max_unlocked_idx - 1)
+                        
+                new_flow_path = flows[flow_idx]
+                
+            elif mode == "random":
+                new_flow_path = random.choice(flows)
+            else:
+                new_flow_path = flows[0] # Single mode (dùng file đầu tiên)
+
+            # Nếu kịch bản thay đổi, khởi tạo lại CityFlow Environment
+            if new_flow_path != current_flow_path:
+                current_flow_path = new_flow_path
+                print(f"\n[INFO] Episode {episode}: Soft Curriculum Switching -> {Path(current_flow_path).name}\n")
+                env = TrafficEnv(
+                    roadnet_path=roadnet_path,
+                    flow_path=current_flow_path,
+                    phase_map=phase_map,
+                    sim_steps_per_action=sim_steps_per_action,
+                )
+            # ------------------------------------------------
+
             states = env.reset()
             episode_reward = 0.0
             final_info = {"atl": 0.0, "throughput": 0.0}
@@ -132,10 +174,6 @@ def train(
                 if loss is not None:
                     last_loss = float(loss)
 
-                # FIX 8: BỎ agent.decay_epsilon() ra khỏi vòng lặp step
-                # Trước: gọi 360 lần/episode → epsilon về min sau <1 episode
-                # Sau: gọi 1 lần/episode → decay đều qua 1000 episodes
-
                 writer.writerows(
                     _episode_rows(
                         episode,
@@ -155,16 +193,17 @@ def train(
                 if done:
                     break
 
-            # FIX 8 (tiếp): decay_epsilon() gọi đúng chỗ - 1 lần/episode
+            # decay_epsilon() gọi đúng chỗ - 1 lần/episode
             agent.decay_epsilon()
 
             if episode_reward > best_reward:
                 best_reward = episode_reward
                 torch.save(agent.q_network.state_dict(), model_output)
 
-            # ghi 1 dòng/episode vào training log
+            # ghi 1 dòng/episode vào training log, log thêm tên flow đang chạy
             training_log_writer.writerow({
                 "episode": episode,
+                "flow_scenario": Path(current_flow_path).name,
                 "reward": round(episode_reward, 4),
                 "atl": round(float(final_info.get("atl", 0.0)), 4),
                 "throughput": round(float(final_info.get("throughput", 0.0)), 1),
@@ -174,9 +213,10 @@ def train(
             training_log_file.flush()
 
             print(
-                "episode={episode} reward={reward:.3f} epsilon={epsilon:.4f} "
+                "episode={episode} flow={flow_name} reward={reward:.3f} epsilon={epsilon:.4f} "
                 "loss={loss:.6f} atl={atl:.3f} throughput={throughput:.0f}".format(
                     episode=episode,
+                    flow_name=Path(current_flow_path).name,
                     reward=episode_reward,
                     epsilon=agent.epsilon,
                     loss=last_loss,
@@ -192,7 +232,28 @@ def train(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train shared DQN traffic controller.")
     parser.add_argument("--roadnet", default="configs/roadnet.json")
-    parser.add_argument("--flow", default="configs/flow_medium.json")
+    
+    parser.add_argument(
+        "--flows", 
+        nargs="+", 
+        default=["configs/flow_medium.json"], 
+        help="List of flow config files for curriculum learning"
+    )
+    
+    parser.add_argument(
+        "--mode", 
+        choices=["single", "curriculum", "random"], 
+        default="single",
+        help="Training mode: single (use first flow), curriculum (progressive), or random"
+    )
+    
+    parser.add_argument(
+        "--curriculum-interval", 
+        type=int, 
+        default=200, 
+        help="Number of episodes per curriculum phase"
+    )
+
     parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--sim-steps-per-action", type=int, default=10)
@@ -202,14 +263,15 @@ def main() -> None:
 
     train(
         roadnet_path=args.roadnet,
-        flow_path=args.flow,
+        flows=args.flows,
+        mode=args.mode,
+        curriculum_interval=args.curriculum_interval,
         episodes=args.episodes,
         steps_per_episode=args.steps,
         sim_steps_per_action=args.sim_steps_per_action,
         output_csv=args.output_csv,
         model_path=args.model_path,
     )
-
 
 if __name__ == "__main__":
     main()

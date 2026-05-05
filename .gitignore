@@ -23,6 +23,7 @@ pytest_tmp_*/
 # Generated data (large, reproducible)
 data/*.csv
 data/*.db
+data/*.db-journal
 models/*.pth
 analysis/*.png
 
@@ -46,3 +47,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+docs/
+memory/
+sample-code/

@@ -1,4 +1,4 @@
-"""Evaluate DQN against MaxPressure and build the offline dataset."""
+"""Evaluate multiple DQNs against MaxPressure and build the offline dataset."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import csv
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -131,6 +132,7 @@ def _run_dqn(
     episodes: int,
     steps_per_episode: int,
     sim_steps_per_action: int,
+    policy_name: str,
 ) -> dict[str, object]:
     phase_map = build_phase_map(roadnet_path)
     env = TrafficEnv(
@@ -146,7 +148,9 @@ def _run_dqn(
     throughput_values: list[float] = []
     rows: list[dict[str, object]] = []
 
+    print(f"\n🚀 Đang đánh giá DQN Model: {Path(model_path).name} ({episodes} episodes)...")
     for episode in range(episodes):
+        start_time = time.time()
         states = env.reset()
         final_info = {"atl": 0.0, "throughput": 0.0}
 
@@ -169,15 +173,20 @@ def _run_dqn(
                     next_states,
                     done,
                     info,
-                    "dqn",
+                    policy_name,
                 )
             )
             states = next_states
             if done:
                 break
 
-        atl_values.append(float(final_info.get("atl", 0.0)))
-        throughput_values.append(float(final_info.get("throughput", 0.0)))
+        atl = float(final_info.get("atl", 0.0))
+        tp = float(final_info.get("throughput", 0.0))
+        atl_values.append(atl)
+        throughput_values.append(tp)
+        
+        elapsed_time = time.time() - start_time
+        print(f"  ➜ [{policy_name}] Episode {episode + 1}/{episodes} | ATL: {atl:6.2f}s | Throughput: {tp:4.0f} xe | Thời gian: {elapsed_time:.2f}s")
 
     return {
         "atl": _mean_metric(atl_values),
@@ -206,7 +215,9 @@ def _run_baseline(
     throughput_values: list[float] = []
     rows: list[dict[str, object]] = []
 
+    print(f"\n⏱️ Đang đánh giá MaxPressure Baseline ({episodes} episodes)...")
     for episode in range(episodes):
+        start_time = time.time()
         states = env.reset()
         controller = MaxPressureBaseline(env.engine, phase_map)
         final_info = {"atl": 0.0, "throughput": 0.0}
@@ -233,8 +244,13 @@ def _run_baseline(
             if done:
                 break
 
-        atl_values.append(float(final_info.get("atl", 0.0)))
-        throughput_values.append(float(final_info.get("throughput", 0.0)))
+        atl = float(final_info.get("atl", 0.0))
+        tp = float(final_info.get("throughput", 0.0))
+        atl_values.append(atl)
+        throughput_values.append(tp)
+        
+        elapsed_time = time.time() - start_time
+        print(f"  ➜ [Baseline] Episode {episode + 1}/{episodes} | ATL: {atl:6.2f}s | Throughput: {tp:4.0f} xe | Thời gian: {elapsed_time:.2f}s")
 
     return {
         "atl": _mean_metric(atl_values),
@@ -309,15 +325,17 @@ def _write_offline_db(db_path: str, rows: list[dict[str, object]]) -> None:
         conn.commit()
 
 
-def _merge_offline_dataset(
-    dqn_csv: str,
+def _merge_offline_dataset_multi(
+    dqn_csvs: list[str],
     baseline_csv: str,
     db_path: str,
 ) -> dict[str, int]:
-    rows = [
-        *_read_csv_rows(dqn_csv, "dqn"),
-        *_read_csv_rows(baseline_csv, "baseline"),
-    ]
+    rows = [*_read_csv_rows(baseline_csv, "baseline")]
+    for dqn_csv in dqn_csvs:
+        # Lấy tên file để suy ra policy name, ví dụ: buffer_best_single.csv -> dqn_best_single
+        policy_name = Path(dqn_csv).stem.replace("buffer_", "dqn_")
+        rows.extend(_read_csv_rows(dqn_csv, policy_name))
+        
     _write_offline_db(db_path, rows)
     counts: dict[str, int] = {}
     for row in rows:
@@ -326,25 +344,19 @@ def _merge_offline_dataset(
     return counts
 
 
-def evaluate(
+def evaluate_multiple(
     roadnet_path: str,
     flow_path: str,
-    model_path: str,
+    model_paths: list[str],
     episodes: int,
     steps_per_episode: int,
     sim_steps_per_action: int,
     baseline_csv: str,
-    dqn_csv: str,
+    base_dqn_csv: str,
     offline_db: str,
 ) -> dict[str, object]:
-    dqn = _run_dqn(
-        roadnet_path,
-        flow_path,
-        model_path,
-        episodes,
-        steps_per_episode,
-        sim_steps_per_action,
-    )
+    
+    # 1. Chạy Baseline 1 lần duy nhất
     baseline = _run_baseline(
         roadnet_path,
         flow_path,
@@ -352,49 +364,76 @@ def evaluate(
         steps_per_episode,
         sim_steps_per_action,
     )
-
-    _write_csv(dqn_csv, dqn["rows"])
     _write_csv(baseline_csv, baseline["rows"])
-    db_counts = _merge_offline_dataset(dqn_csv, baseline_csv, offline_db)
+
+    models_results = {}
+    dqn_csvs = []
+
+    # 2. Duyệt qua tất cả các model được truyền vào
+    for model_path in model_paths:
+        model_name = Path(model_path).stem  # ví dụ: 'best_single', 'best_curriculum'
+        policy_name = f"dqn_{model_name}"
+        
+        dqn = _run_dqn(
+            roadnet_path,
+            flow_path,
+            model_path,
+            episodes,
+            steps_per_episode,
+            sim_steps_per_action,
+            policy_name,
+        )
+        models_results[model_name] = dqn
+        
+        # Lưu ra từng file csv riêng biệt cho mỗi model
+        csv_path = str(Path(base_dqn_csv).parent / f"buffer_{model_name}.csv")
+        _write_csv(csv_path, dqn["rows"])
+        dqn_csvs.append(csv_path)
+
+    # 3. Gộp tất cả vào SQLite DB
+    db_counts = _merge_offline_dataset_multi(dqn_csvs, baseline_csv, offline_db)
 
     return {
-        "dqn": dqn,
+        "models": models_results,
         "baseline": baseline,
         "db_counts": db_counts,
     }
 
 
-def _print_summary(results: dict[str, object], flow_path: str) -> None:
-    dqn = results["dqn"]
+def _print_summary_multi(results: dict[str, object], flow_path: str) -> None:
+    models_res = results["models"]
     baseline = results["baseline"]
     db_counts = results["db_counts"]
 
-    print("")
-    print(f"DQN vs Baseline summary for {flow_path}")
-    print("policy      atl        throughput")
-    print(
-        "dqn         {atl:10.3f} {throughput:10.0f}".format(
-            atl=float(dqn["atl"]),
-            throughput=float(dqn["throughput"]),
-        )
-    )
-    print(
-        "baseline    {atl:10.3f} {throughput:10.0f}".format(
-            atl=float(baseline["atl"]),
-            throughput=float(baseline["throughput"]),
-        )
-    )
-    print(f"DQN model loaded: {bool(dqn['model_loaded'])}")
-    print(f"Offline DB rows by policy: {db_counts}")
+    print(f"\n{'='*55}")
+    print(f"📊 SUMMARY REPORT FOR FLOW: {Path(flow_path).name}")
+    print(f"{'='*55}")
+    print(f"{'Policy Name':<25} | {'ATL (s)':<10} | {'Throughput':<10}")
+    print(f"{'-'*55}")
+    
+    # In kết quả Baseline
+    print(f"{'baseline':<25} | {float(baseline['atl']):<10.3f} | {float(baseline['throughput']):<10.0f}")
+    
+    # In kết quả từng Model
+    for model_name, res in models_res.items():
+        policy_name = f"dqn_{model_name}"
+        print(f"{policy_name:<25} | {float(res['atl']):<10.3f} | {float(res['throughput']):<10.0f}")
+        
+    print(f"{'-'*55}")
+    print(f"Offline DB rows count: {db_counts}")
+    print(f"{'='*55}\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate shared DQN against MaxPressure and build offline data."
+        description="Evaluate multiple DQNs against MaxPressure and build offline data."
     )
     parser.add_argument("--roadnet", default="configs/roadnet.json")
     parser.add_argument("--flow", default="configs/flow_medium.json")
-    parser.add_argument("--model", default="models/best.pth")
+    
+    # Thay đổi: Nhận một mảng (list) các file model
+    parser.add_argument("--models", nargs="+", default=["models/best.pth"], help="List of model files to test")
+    
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--sim-steps-per-action", type=int, default=10)
@@ -403,18 +442,18 @@ def main() -> None:
     parser.add_argument("--offline-db", default="data/offline_dataset.db")
     args = parser.parse_args()
 
-    results = evaluate(
+    results = evaluate_multiple(
         roadnet_path=args.roadnet,
         flow_path=args.flow,
-        model_path=args.model,
+        model_paths=args.models,
         episodes=args.episodes,
         steps_per_episode=args.steps,
         sim_steps_per_action=args.sim_steps_per_action,
         baseline_csv=args.baseline_csv,
-        dqn_csv=args.dqn_csv,
+        base_dqn_csv=args.dqn_csv,
         offline_db=args.offline_db,
     )
-    _print_summary(results, args.flow)
+    _print_summary_multi(results, args.flow)
 
 
 if __name__ == "__main__":
