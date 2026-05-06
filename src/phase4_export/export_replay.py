@@ -131,7 +131,7 @@ def export_replay_data(
     action_interval: int,
     output_path: str,
     algorithm: str = "baseline",
-    model_path: str = "models/best.pth",
+    model_path: str = "models/best_curriculum.pth",
 ) -> None:
     if cityflow is None:
         raise RuntimeError("cityflow is required to export replay data")
@@ -139,6 +139,7 @@ def export_replay_data(
     phase_map = build_phase_map(roadnet_path)
     road_map = _load_roads(roadnet_path)
     frames = []
+    tracker = _VehicleTracker(TrafficEnv._count_generated_vehicles(flow_path))
 
     # ── BASELINE (MaxPressure) ──────────────────────────────────────────────
     if algorithm == "baseline":
@@ -154,12 +155,16 @@ def export_replay_data(
 
             counts = engine.get_lane_vehicle_count()
             agents, total_queue = _build_agents(counts, phase_map, current_actions)
-            throughput = _get_throughput(engine)
+            metrics = tracker.update(engine)
 
             frames.append({
                 "time": float(engine.get_current_time()),
                 "atl": float(engine.get_average_travel_time()),
-                "throughput": int(throughput),
+                "throughput": int(metrics["completed"]),
+                "completed": int(metrics["completed"]),
+                "active": int(metrics["active"]),
+                "generated": int(metrics["generated"]),
+                "completion_rate": metrics["completion_rate"],
                 "total_queue": total_queue,
                 "agents": agents,
                 "vehicles": _snapshot_vehicles(engine, road_map),
@@ -197,18 +202,19 @@ def export_replay_data(
                 # FIX: cập nhật engine reference sau mỗi step
                 engine = env.engine
                 states = next_states
-                if done:
-                    states = env.reset()
-                    engine = env.engine
 
             counts = engine.get_lane_vehicle_count()
             agents, total_queue = _build_agents(counts, phase_map, current_actions)
-            throughput = _get_throughput(engine)
+            metrics = tracker.update(engine)
 
             frames.append({
                 "time": float(engine.get_current_time()),
                 "atl": float(engine.get_average_travel_time()),
-                "throughput": int(throughput),
+                "throughput": int(metrics["completed"]),
+                "completed": int(metrics["completed"]),
+                "active": int(metrics["active"]),
+                "generated": int(metrics["generated"]),
+                "completion_rate": metrics["completion_rate"],
                 "total_queue": total_queue,
                 "agents": agents,
                 "vehicles": _snapshot_vehicles(engine, road_map),
@@ -263,20 +269,78 @@ def _build_agents(
     return agents, total_queue
 
 
-def _get_throughput(engine) -> int:
+class _VehicleTracker:
+    def __init__(self, generated: int):
+        self.generated = generated
+        self.seen: set[str] = set()
+        self.completed: set[str] = set()
+
+    def update(self, engine) -> dict[str, float]:
+        active_ids = _active_vehicle_ids(engine)
+        if active_ids is not None:
+            self.completed.update(self.seen - active_ids)
+            self.seen.update(active_ids)
+            active = len(active_ids)
+            completed = len(self.completed)
+        else:
+            active = _active_vehicle_count(engine)
+            completed = _finished_vehicle_count(engine)
+
+        generated = max(self.generated, len(self.seen), completed)
+        return {
+            "completed": float(completed),
+            "active": float(active),
+            "generated": float(generated),
+            "completion_rate": float(completed / generated) if generated else 0.0,
+        }
+
+
+def _active_vehicle_ids(engine) -> set[str] | None:
+    getter = getattr(engine, "get_lane_vehicles", None)
+    if not callable(getter):
+        return None
+    try:
+        lane_vehicles = getter()
+    except Exception:
+        return None
+    if not isinstance(lane_vehicles, dict):
+        return None
+    return {
+        str(vehicle_id)
+        for vehicle_ids in lane_vehicles.values()
+        for vehicle_id in vehicle_ids
+    }
+
+
+def _active_vehicle_count(engine) -> int:
+    getter = getattr(engine, "get_vehicle_count", None)
+    if not callable(getter):
+        return 0
+    try:
+        return int(getter())
+    except Exception:
+        return 0
+
+
+def _finished_vehicle_count(engine) -> int:
     getter = getattr(engine, "get_finished_vehicle_count", None)
-    return getter() if getter else engine.get_vehicle_count()
+    if not callable(getter):
+        return 0
+    try:
+        return int(getter())
+    except Exception:
+        return 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export replay data for the dashboard.")
-    parser.add_argument("--roadnet", default="configs/roadnet.json")
-    parser.add_argument("--flow", default="configs/flow_high.json")
+    parser.add_argument("--roadnet", default="configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json")
+    parser.add_argument("--flow", default="configs/flow_high_flat.json")
     parser.add_argument("--algorithm", choices=["baseline", "model"], default="baseline")
     parser.add_argument("--steps", type=int, default=600)
     parser.add_argument("--action-interval", type=int, default=10)
     parser.add_argument("--output", default="web/data/high.json")
-    parser.add_argument("--model-path", default="models/best.pth")
+    parser.add_argument("--model-path", default="models/best_curriculum.pth")
     args = parser.parse_args()
     export_replay_data(
         args.roadnet,

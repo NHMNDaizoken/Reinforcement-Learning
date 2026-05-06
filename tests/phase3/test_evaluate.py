@@ -146,6 +146,6 @@ def test_normalize_checkpoint_state_dict_accepts_old_sequential_keys():
 
     normalized = evaluate_module._normalize_checkpoint_state_dict(old_state)
 
-    assert normalized["input_layer.weight"].shape == (26, 128)
-    assert normalized["hidden_layer.weight"].shape == (128, 64)
-    assert normalized["output_layer.weight"].shape == (64, 2)
+    assert normalized["input_layer.weight"].shape == (128, 26)
+    assert normalized["hidden_layer.weight"].shape == (64, 128)
+    assert normalized["output_layer.weight"].shape == (2, 64)

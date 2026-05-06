@@ -21,7 +21,7 @@ def plot_training_log(log_path: Path = LOG_PATH, output_dir: Path = OUTPUT_DIR) 
     with log_path.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             episodes.append(int(row["episode"]))
-            rewards.append(float(row["reward"]))
+            rewards.append(float(row.get("avg_reward", row.get("reward", 0.0))))
             atls.append(float(row["atl"]))
             losses.append(float(row["loss"]))
             epsilons.append(float(row["epsilon"]))

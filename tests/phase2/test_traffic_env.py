@@ -17,6 +17,10 @@ def _mock_env(phase_current: dict, counts: dict) -> TrafficEnv:
     env.inter_ids = ["i0", "i1"]
     env.n_agents = 2
     env._current_phases = phase_current
+    env._phase_elapsed = {inter_id: 10 for inter_id in env.inter_ids}
+    env.min_green = 10
+    env.max_queue = 50.0
+    env.max_waiting = 50.0
     env.engine = MagicMock()
     env.engine.get_lane_vehicle_count.return_value = counts
     return env
@@ -24,7 +28,7 @@ def _mock_env(phase_current: dict, counts: dict) -> TrafficEnv:
 
 def test_state_dim_uses_queue_counts_and_phase_one_hot():
     env = _mock_env({"i0": 0, "i1": 0}, {})
-    assert env.state_dim == 6
+    assert env.state_dim == 10
 
 
 def test_reward_is_negative_max_pressure():
@@ -40,7 +44,7 @@ def test_reward_is_negative_max_pressure():
     }
     env = _mock_env({"i0": 0, "i1": 0}, counts)
     rewards = env._get_rewards()
-    assert rewards[0] == pytest.approx(-4.0)
+    assert rewards[0] == pytest.approx(-8.0)
 
 
 def test_state_contains_current_phase_one_hot():

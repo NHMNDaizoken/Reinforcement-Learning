@@ -20,7 +20,7 @@ echo "=============================================" | tee -a $LOG_FILE
 
 time python src/phase2_dqn/train_dqn.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flow configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json \
+  --flows configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json \
   --episodes 500 \
   --model-path models/best_single.pth 2>&1 | tee -a $LOG_FILE
 
@@ -49,4 +49,3 @@ echo "✅ HOÀN TẤT TOÀN BỘ QUÁ TRÌNH HUẤN LUYỆN!" | tee -a $LOG_FILE
 echo "Thời gian kết thúc: $(date)" | tee -a $LOG_FILE
 echo "Vui lòng chạy file run_all_evals.sh để đánh giá kết quả." | tee -a $LOG_FILE
 echo "=============================================" | tee -a $LOG_FILE
-

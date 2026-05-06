@@ -35,6 +35,7 @@ def _episode_rows(
     next_states: list[np.ndarray],
     done: bool,
     info: dict[str, float],
+    flow_scenario: str,
 ) -> list[dict[str, object]]:
     rows = []
     for idx, agent_id in enumerate(agent_ids):
@@ -50,6 +51,14 @@ def _episode_rows(
                 "done": int(done),
                 "atl": float(info.get("atl", 0.0)),
                 "throughput": float(info.get("throughput", 0.0)),
+                "is_decision_phase": int(bool(info.get("is_decision_phase", True))),
+                "is_clearance_phase": int(bool(info.get("is_clearance_phase", False))),
+                "sim_time": float(info.get("sim_time", 0.0)),
+                "completed": float(info.get("completed", info.get("throughput", 0.0))),
+                "active": float(info.get("active", 0.0)),
+                "generated": float(info.get("generated", 0.0)),
+                "completion_rate": float(info.get("completion_rate", 0.0)),
+                "flow_scenario": flow_scenario,
             }
         )
     return rows
@@ -89,26 +98,32 @@ def _make_env(
     flow_path: str,
     phase_map: dict,
     sim_steps_per_action: int,
+    decision_duration: int,
 ) -> TrafficEnv:
     return TrafficEnv(
         roadnet_path=roadnet_path,
         flow_path=flow_path,
         phase_map=phase_map,
         sim_steps_per_action=sim_steps_per_action,
+        decision_duration=decision_duration,
     )
 
 
 def train(
     roadnet_path: str,
-    flows: list[str],
-    mode: str,
-    curriculum_interval: int,
-    episodes: int,
-    steps_per_episode: int,
-    sim_steps_per_action: int,
-    output_csv: str,
-    model_path: str,
+    flows: list[str] | None = None,
+    mode: str = "single",
+    curriculum_interval: int = 200,
+    episodes: int = 1200,
+    steps_per_episode: int = 360,
+    sim_steps_per_action: int = 10,
+    output_csv: str = "data/buffer_dqn.csv",
+    model_path: str = "models/best_curriculum.pth",
+    flow_path: str | None = None,
 ) -> dict[str, float]:
+    if flows is None:
+        flows = [flow_path] if flow_path is not None else []
+
     if not flows:
         raise ValueError("flows must contain at least one flow config")
 
@@ -122,6 +137,7 @@ def train(
         raise ValueError("steps_per_episode must be > 0")
 
     phase_map = build_phase_map(roadnet_path)
+    decision_duration = steps_per_episode * sim_steps_per_action
 
     current_flow_path = flows[0]
     print(f"\n[INFO] Initializing environment with flow: {current_flow_path}")
@@ -131,6 +147,7 @@ def train(
         flow_path=current_flow_path,
         phase_map=phase_map,
         sim_steps_per_action=sim_steps_per_action,
+        decision_duration=decision_duration,
     )
 
     agent = SharedDQNAgent(state_dim=env.state_dim, action_dim=env.action_dim)
@@ -154,6 +171,14 @@ def train(
         "done",
         "atl",
         "throughput",
+        "is_decision_phase",
+        "is_clearance_phase",
+        "sim_time",
+        "completed",
+        "active",
+        "generated",
+        "completion_rate",
+        "flow_scenario",
     ]
 
     training_log_fields = [
@@ -162,6 +187,11 @@ def train(
         "avg_reward",
         "atl",
         "throughput",
+        "completed",
+        "active",
+        "generated",
+        "completion_rate",
+        "checkpoint_score",
         "loss",
         "epsilon",
     ]
@@ -169,7 +199,6 @@ def train(
     best_reward = float("-inf")
     last_loss = 0.0
     global_step = 0
-    target_update_freq = 1000
 
     with (
         csv_path.open("w", newline="", encoding="utf-8") as buffer_file,
@@ -202,11 +231,19 @@ def train(
                     flow_path=current_flow_path,
                     phase_map=phase_map,
                     sim_steps_per_action=sim_steps_per_action,
+                    decision_duration=decision_duration,
                 )
 
             states = env.reset()
             episode_reward = 0.0
-            final_info = {"atl": 0.0, "throughput": 0.0}
+            final_info = {
+                "atl": 0.0,
+                "throughput": 0.0,
+                "completed": 0.0,
+                "active": 0.0,
+                "generated": 0.0,
+                "completion_rate": 0.0,
+            }
             actual_steps = 0
 
             for step in range(steps_per_episode):
@@ -237,7 +274,7 @@ def train(
                     last_loss = float(loss)
 
                 if (
-                    global_step % target_update_freq == 0
+                    global_step % getattr(agent, "target_update_freq", 1000) == 0
                     and hasattr(agent, "update_target_network")
                 ):
                     agent.update_target_network()
@@ -253,6 +290,7 @@ def train(
                         next_states=next_states,
                         done=done,
                         info=info,
+                        flow_scenario=Path(current_flow_path).name,
                     )
                 )
 
@@ -266,9 +304,10 @@ def train(
 
             # Average reward đúng theo số step thật sự đã chạy.
             avg_reward = episode_reward / max(1, actual_steps * env.n_agents)
+            checkpoint_score = avg_reward
 
-            if avg_reward > best_reward:
-                best_reward = avg_reward
+            if checkpoint_score > best_reward:
+                best_reward = checkpoint_score
                 torch.save(agent.q_network.state_dict(), model_output)
 
             log_writer.writerow(
@@ -278,6 +317,11 @@ def train(
                     "avg_reward": round(avg_reward, 4),
                     "atl": round(float(final_info.get("atl", 0.0)), 4),
                     "throughput": round(float(final_info.get("throughput", 0.0)), 1),
+                    "completed": round(float(final_info.get("completed", 0.0)), 1),
+                    "active": round(float(final_info.get("active", 0.0)), 1),
+                    "generated": round(float(final_info.get("generated", 0.0)), 1),
+                    "completion_rate": round(float(final_info.get("completion_rate", 0.0)), 6),
+                    "checkpoint_score": round(checkpoint_score, 4),
                     "loss": round(last_loss, 6),
                     "epsilon": round(agent.epsilon, 4),
                 }
@@ -287,14 +331,15 @@ def train(
             print(
                 "episode={episode} flow={flow_name} avg_reward={avg_reward:.3f} "
                 "eps={epsilon:.3f} loss={loss:.4f} atl={atl:.1f} "
-                "throughput={throughput:.0f}".format(
+                "completed={completed:.0f}/{generated:.0f}".format(
                     episode=episode,
                     flow_name=Path(current_flow_path).name,
                     avg_reward=avg_reward,
                     epsilon=agent.epsilon,
                     loss=last_loss,
                     atl=float(final_info.get("atl", 0.0)),
-                    throughput=float(final_info.get("throughput", 0.0)),
+                    completed=float(final_info.get("completed", 0.0)),
+                    generated=float(final_info.get("generated", 0.0)),
                 )
             )
 
@@ -306,12 +351,12 @@ def main() -> None:
         description="Train shared DQN traffic controller."
     )
 
-    parser.add_argument("--roadnet", default="configs/roadnet.json")
+    parser.add_argument("--roadnet", default="configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json")
 
     parser.add_argument(
         "--flows",
         nargs="+",
-        default=["configs/flow_medium.json"],
+        default=["configs/flow_medium_flat.json"],
         help="List of flow config files for curriculum learning.",
     )
 

@@ -71,4 +71,4 @@ def test_train_writes_transition_log_and_checkpoint(tmp_path, monkeypatch):
     assert rows[0].startswith("episode,step,agent_id,state_vec")
     assert len(rows) == 3
     assert model_path.read_bytes() == b"model"
-    assert result["best_reward"] == -3.0
+    assert result["best_reward"] == -1.5

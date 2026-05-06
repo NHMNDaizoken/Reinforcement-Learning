@@ -2,8 +2,46 @@
 
 **Algorithm:** Shared DQN (PressLight-inspired) + MaxPressure reward
 **Simulator:** CityFlow
-**Scale:** Synthetic (3×3) → Open Datasets → Real-world
-**Status:** Roadmap 1 completed → transitioning to Roadmap 2
+**Scale:** Synthetic (3×3) → Open Dataset (3×3 Gaussian) → Real-world
+**Status:** Roadmap 1 completed → Roadmap 2 environment/metrics hardening in progress
+
+---
+
+# **CHANGE INFO — 2026-05-06**
+
+Implemented changes:
+
+* Split simulation into decision and clearance phases:
+  * decision phase: action selection, rewards, training, replay/offline rows
+  * clearance phase: final ATL/completion metrics only
+* Replaced ambiguous throughput fallback with completed-vehicle tracking.
+* Added completion metrics everywhere:
+  * `completed`
+  * `active`
+  * `generated`
+  * `completion_rate`
+* Expanded state representation:
+  * normalized incoming queues
+  * normalized downstream queues
+  * normalized waiting queues
+  * phase elapsed time
+  * min-green remaining
+  * current phase one-hot
+* Changed environment reward to negative absolute pressure of the applied phase.
+* Added min-green phase-hold/action-mask support in `TrafficEnv`.
+* Added explicit DQN target-network sync method.
+* Updated training logs, evaluation CSVs, SQLite offline data, replay export JSON,
+  plotting, shell commands, and tests to match the new metric schema.
+* Updated config generation to produce both legacy low/medium/high flows and
+  demand curriculum flows, with all generated vehicles spawned before 2700s.
+
+Impact:
+
+* Replay buffers should no longer contain clearance-phase transitions.
+* ATL and completion metrics are computed after vehicles have time to exit.
+* Reports should refer to completed vehicles instead of generic throughput.
+* Old result tables should be treated as pre-change results and not compared
+  directly with new post-clearance metrics.
 
 ---
 
@@ -37,11 +75,11 @@ pip install . --no-build-isolation
 ## **2. Phase 1 — Environment & Baseline**
 
 * Generated 3×3 grid (9 intersections)
-* Created synthetic traffic flows:
+* Created synthetic traffic flows from the Gaussian dataset routes:
 
-  * Low (~300 veh/h)
-  * Medium (~600 veh/h)
-  * High (~900 veh/h)
+  * Low flat / peak (300 vehicles)
+  * Medium flat / peak (600 vehicles)
+  * High flat / peak (900 vehicles)
 
 Baseline: **MaxPressure**
 
@@ -54,6 +92,7 @@ Baseline: **MaxPressure**
 * State: `[q_in, q_out, one_hot(phase)]`
 * Reward: `r = -(sum(q_in) - sum(q_out))`
 * One shared Q-network for all intersections
+* Supports `single`, `random`, and `curriculum` modes through `--flows`
 
 ### Key Fixes
 
@@ -78,8 +117,8 @@ Baseline: **MaxPressure**
 
 ### Observations
 
-* DQN outperforms baseline on **high traffic (ATL)**
-* Fails on medium → **domain mismatch**
+* DQN outperforms baseline on **high traffic (ATL)** in the Roadmap 1 run
+* Fails on medium -> **domain mismatch**
 * Training improved significantly after epsilon fix
 
 ---
@@ -89,7 +128,7 @@ Baseline: **MaxPressure**
 Features:
 
 * Dark mode
-* Vehicle visualization (🚗🚌🛵)
+* Vehicle visualization
 * Replay simulation
 * DQN vs Baseline comparison
 
@@ -146,9 +185,17 @@ Dataset:
 
 * `syn_3x3_gaussian_500`
 
-```bash
-git clone https://github.com/traffic-signal-control/sample-code.git
-cp -r sample-code/data/syn_3x3_gaussian_500_1h configs/
+Current local path:
+
+```text
+configs/syn_3x3_gaussian_500_1h/
+```
+
+Main files:
+
+```text
+configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json
+configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json
 ```
 
 **Target:**
@@ -158,7 +205,7 @@ cp -r sample-code/data/syn_3x3_gaussian_500_1h configs/
 
 ### **2. Peak Traffic Scenario**
 
-Create:
+Created:
 
 ```
 flow_low_peak.json
@@ -166,7 +213,15 @@ flow_medium_peak.json
 flow_high_peak.json
 ```
 
-* Simulate rush-hour traffic spikes
+Also generated flat variants:
+
+```
+flow_low_flat.json
+flow_medium_flat.json
+flow_high_flat.json
+```
+
+Peak flows place 70% of vehicles between 900s and 1800s.
 
 ---
 
@@ -174,29 +229,31 @@ flow_high_peak.json
 
 | Scenario    | Status |
 | ----------- | ------ |
-| Low Flat    | ⏳      |
-| Medium Flat | ⏳      |
-| High Flat   | ✅      |
-| Gaussian    | ⏳      |
-| Peak        | ❌      |
+| Low Flat    | ready |
+| Medium Flat | ready |
+| High Flat   | ready |
+| Gaussian    | ready |
+| Peak        | ready |
 
 ---
 
 ### **4. Curriculum Learning (Core)**
 
 ```
-0–200   → low_flat
-200–400 → medium_flat
-400–600 → high_flat
-600–800 → gaussian
-800–1000 → high_peak
+0-200     -> low_flat
+200-400   -> low_peak
+400-600   -> medium_flat
+600-800   -> medium_peak
+800-1000  -> high_flat
+1000-1200 -> gaussian
 ```
 
-**Tasks:**
+**Implemented:**
 
-* Modify `train_dqn.py`
-* Support multiple flows
-* Add curriculum mode
+* `train_dqn.py` accepts `--flows`
+* `--mode curriculum` unlocks one additional flow every `--curriculum-interval`
+* Current curriculum samples the hardest unlocked flow 75% of the time and old
+  unlocked flows 25% of the time
 
 ---
 
@@ -277,20 +334,35 @@ flow_high_peak.json
 
 ---
 
-## **VII. Immediate Actions**
+## **VII. Current Commands**
 
 ```bash
-git checkout -b feat/roadmap2
+# Regenerate flat/peak flows from the local Gaussian routes
+python configs/generate_configs.py
 
-# Download dataset
-git clone https://github.com/traffic-signal-control/sample-code.git /tmp/tssc
-cp -r /tmp/tssc/data/syn_3x3_gaussian_500_1h configs/
-
-# Train quick test
+# Train single Gaussian model
 python src/phase2_dqn/train_dqn.py \
-  --roadnet configs/syn_3x3_gaussian_500_1h/roadnet.json \
-  --flow configs/syn_3x3_gaussian_500_1h/flow.json \
-  --episodes 200
+  --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
+  --flows configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json \
+  --mode single \
+  --episodes 500 \
+  --model-path models/best_single.pth
+
+# Train curriculum model
+python src/phase2_dqn/train_dqn.py \
+  --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
+  --flows configs/flow_low_flat.json configs/flow_low_peak.json configs/flow_medium_flat.json configs/flow_medium_peak.json configs/flow_high_flat.json configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json \
+  --mode curriculum \
+  --curriculum-interval 200 \
+  --episodes 1200 \
+  --model-path models/best_curriculum.pth
+
+# Evaluate baseline + both models
+python src/phase3_eval/evaluate.py \
+  --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
+  --flow configs/flow_high_peak.json \
+  --models models/best_single.pth models/best_curriculum.pth \
+  --episodes 50
 ```
 
 ---
@@ -300,5 +372,3 @@ python src/phase2_dqn/train_dqn.py \
 * Roadmap 1 = **working system (baseline + DQN + dashboard)**
 * Roadmap 2 = **make it research-grade + demo-ready**
 * Final goal = **beat baseline on real datasets + present visually**
-
-

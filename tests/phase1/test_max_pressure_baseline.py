@@ -52,6 +52,6 @@ def test_select_actions_returns_action_for_each_intersection():
 
 
 def test_build_phase_map_reads_generated_roadnet():
-    phase_map = build_phase_map("configs/roadnet.json")
+    phase_map = build_phase_map("configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json")
     assert len(phase_map) == 9
     assert all(len(phases) >= 2 for phases in phase_map.values())

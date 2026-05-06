@@ -118,14 +118,14 @@ def huber_loss(
 class SharedDQNAgent:
     state_dim: int
     action_dim: int
-    learning_rate: float = 5e-4        # FIX 2: 1e-3 → 5e-4 (học ổn định hơn, không nhảy qua optima)
+    learning_rate: float = 5e-4
     gamma: float = 0.95
     epsilon: float = 1.0
-    epsilon_min: float = 0.05          # FIX 3: 0.01 → 0.05 (giữ explore suốt quá trình train)
-    epsilon_decay: float = 0.9958      # FIX 4: 0.995 → 0.9995 (decay chậm hơn, xem giải thích bên dưới)
-    buffer_capacity: int = 50000       # FIX 5: 5000 → 50000 (nhớ nhiều tình huống đa dạng hơn)
-    batch_size: int = 256              # FIX 6: 64 → 256 (gradient ổn định hơn)
-    target_update_freq: int = 1000     # FIX 7: 200 → 1000 (Q-target ổn định hơn)
+    epsilon_min: float = 0.05
+    epsilon_decay: float = 0.9958
+    buffer_capacity: int = 50000
+    batch_size: int = 256
+    target_update_freq: int = 1000
     huber_delta: float = 1.0
     grad_max_norm: float = 10.0
     device: str | torch.device = "cpu"
@@ -189,9 +189,13 @@ class SharedDQNAgent:
         self.replay_buffer.push(state, action, reward, next_state, done)
 
     def decay_epsilon(self) -> float:
-        """Decay exploration rate by one step. Call once per environment step."""
+        """Decay exploration rate once per completed decision episode."""
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         return self.epsilon
+
+    def update_target_network(self) -> None:
+        """Synchronize target-network weights with the online Q-network."""
+        self.target_network.load_state_dict(self.q_network.state_dict())
 
     def update(self) -> float | None:
         """Sample a minibatch and perform one gradient update. Does NOT decay epsilon."""
@@ -226,6 +230,6 @@ class SharedDQNAgent:
 
         self.update_count += 1
         if self.update_count % self.target_update_freq == 0:
-            self.target_network.load_state_dict(self.q_network.state_dict())
+            self.update_target_network()
 
         return float(loss.item())
