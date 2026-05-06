@@ -573,36 +573,113 @@ def _print_summary_multi(results: dict[str, object], flow_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate multiple DQNs against MaxPressure and build offline data."
+        description="Evaluate DQNs against MaxPressure on multiple traffic flows."
     )
-    parser.add_argument("--roadnet", default="configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json")
-    parser.add_argument("--flow", default="configs/flow_medium_flat.json")
+
+    parser.add_argument(
+        "--roadnet",
+        default="configs/roadnet.json",
+        help="Roadnet used for both training and evaluation.",
+    )
+
+    parser.add_argument(
+        "--flows",
+        nargs="+",
+        default=[
+            "configs/flow_low_flat.json",
+            "configs/flow_medium_flat.json",
+            "configs/flow_high_flat.json",
+            "configs/flow_low_peak.json",
+            "configs/flow_medium_peak.json",
+            "configs/flow_high_peak.json",
+        ],
+        help="List of flow files to evaluate, PressLight-style.",
+    )
+
     parser.add_argument(
         "--models",
         nargs="+",
         default=["models/best_curriculum.pth"],
-        help="List of model files to test",
+        help="List of trained DQN model files.",
     )
+
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--sim-steps-per-action", type=int, default=10)
-    parser.add_argument("--baseline-csv", default="data/buffer_baseline.csv")
-    parser.add_argument("--dqn-csv", default="data/buffer_dqn.csv")
-    parser.add_argument("--offline-db", default="data/offline_dataset.db")
+
+    parser.add_argument("--output-dir", default="data/eval")
     args = parser.parse_args()
 
-    results = evaluate_multiple(
-        roadnet_path=args.roadnet,
-        flow_path=args.flow,
-        model_paths=args.models,
-        episodes=args.episodes,
-        steps_per_episode=args.steps,
-        sim_steps_per_action=args.sim_steps_per_action,
-        baseline_csv=args.baseline_csv,
-        base_dqn_csv=args.dqn_csv,
-        offline_db=args.offline_db,
-    )
-    _print_summary_multi(results, args.flow)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    suite_rows = []
+
+    for flow_path in args.flows:
+        flow_name = Path(flow_path).stem
+
+        print(f"\n\n==============================")
+        print(f"Evaluating flow: {flow_name}")
+        print(f"==============================")
+
+        results = evaluate_multiple(
+            roadnet_path=args.roadnet,
+            flow_path=flow_path,
+            model_paths=args.models,
+            episodes=args.episodes,
+            steps_per_episode=args.steps,
+            sim_steps_per_action=args.sim_steps_per_action,
+            baseline_csv=str(output_dir / f"buffer_baseline_{flow_name}.csv"),
+            base_dqn_csv=str(output_dir / f"buffer_dqn_{flow_name}.csv"),
+            offline_db=str(output_dir / f"offline_dataset_{flow_name}.db"),
+        )
+
+        _print_summary_multi(results, flow_path)
+
+        baseline = results["baseline"]
+        suite_rows.append(
+            {
+                "flow": flow_name,
+                "policy": "baseline",
+                "atl": float(baseline["atl"]),
+                "completed": float(baseline["completed"]),
+                "active": float(baseline["active"]),
+                "generated": float(baseline["generated"]),
+                "completion_rate": float(baseline["completion_rate"]),
+            }
+        )
+
+        for model_name, res in results["models"].items():
+            suite_rows.append(
+                {
+                    "flow": flow_name,
+                    "policy": f"dqn_{model_name}",
+                    "atl": float(res["atl"]),
+                    "completed": float(res["completed"]),
+                    "active": float(res["active"]),
+                    "generated": float(res["generated"]),
+                    "completion_rate": float(res["completion_rate"]),
+                }
+            )
+
+    summary_path = output_dir / "summary_all_flows.csv"
+    with summary_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "flow",
+                "policy",
+                "atl",
+                "completed",
+                "active",
+                "generated",
+                "completion_rate",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(suite_rows)
+
+    print(f"\nSaved benchmark summary to: {summary_path}")
 
 
 if __name__ == "__main__":

@@ -9,14 +9,15 @@ generates replay JSON for an Expo dashboard.
 
 - **Simulator:** CityFlow with a 3x3 roadnet from the open
   `syn_3x3_gaussian_500_1h` dataset.
-- **Synthetic flows:** generated flat and peak variants for low, medium, and
-  high demand.
+- **Synthetic flows:** generated Gaussian training seeds in
+  `configs/train_flows/` plus flat/peak evaluation benchmarks in
+  `configs/eval_flows/`.
 - **Open dataset:** `configs/syn_3x3_gaussian_500_1h/` is present and used as
   the main Gaussian scenario.
 - **RL controller:** 9 independent intersections sharing one DQN parameter set.
 - **Baseline:** greedy local MaxPressure controller.
-- **Training modes:** `single`, `random`, and `curriculum` over one or more flow
-  files.
+- **Training modes:** `single`, `random`, and `curriculum` over a flow
+  directory.
 - **Evaluation:** evaluates MaxPressure plus one or more DQN checkpoints and
   writes CSV/SQLite offline data.
 - **Dashboard:** Expo / React Native app reads pre-exported JSON from
@@ -36,8 +37,8 @@ generates replay JSON for an Expo dashboard.
   applied, and added min-green action masking/phase-hold support.
 - Updated DQN training/evaluation logs and SQLite offline data with decision
   phase flags, simulation time, completion metrics, and flow scenario names.
-- Updated generated flow scripts to create legacy low/medium/high flows plus
-  demand curriculum flows, all with 900s of clearance headroom.
+- Replaced the old single config generator with separate scripts for training
+  seeds and evaluation benchmarks.
 - Updated baseline, training, evaluation, replay export, plotting, batch
   scripts, and tests for the new environment and metric semantics.
 
@@ -45,8 +46,10 @@ generates replay JSON for an Expo dashboard.
 
 ```text
 configs/
-  generate_configs.py             Generates flat/peak flows from Gaussian routes
-  flow_*_{flat,peak}.json          Synthetic low/medium/high scenarios
+  generate_train_flows.py          Generates Gaussian training seeds
+  generate_eval_benchmarks.py      Generates flat/peak evaluation flows
+  train_flows/                     Gaussian training flow seeds
+  eval_flows/                      Low/medium/high flat and peak benchmarks
   syn_3x3_gaussian_500_1h/         Open 3x3 Gaussian roadnet and flow
 src/
   phase1_env_baseline/
@@ -93,8 +96,9 @@ npm install
 ## Common Commands
 
 ```bash
-# Regenerate flat/peak flow files from the Gaussian dataset routes
-python configs/generate_configs.py
+# Regenerate training and evaluation flow files
+python configs/generate_train_flows.py
+python configs/generate_eval_benchmarks.py
 
 # Run tests
 python -m pytest
@@ -102,32 +106,44 @@ python -m pytest
 # Run MaxPressure baseline on the Gaussian roadnet
 python src/phase1_env_baseline/max_pressure.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flow configs/flow_high_flat.json \
+  --flow configs/eval_flows/high_flat_eval.json \
   --steps 3600
 
 # Train a single DQN model on the Gaussian scenario
 python src/phase2_dqn/train_dqn.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flows configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json \
+  --flows-dir configs/syn_3x3_gaussian_500_1h \
   --mode single \
   --episodes 500 \
   --model-path models/best_single.pth
 
-# Train a curriculum model across generated and Gaussian flows
+# Train a curriculum model across generated training flows
 python src/phase2_dqn/train_dqn.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flows configs/flow_low_flat.json configs/flow_low_peak.json configs/flow_medium_flat.json configs/flow_medium_peak.json configs/flow_high_flat.json configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json \
+  --flows-dir configs/train_flows \
   --mode curriculum \
-  --curriculum-interval 200 \
-  --episodes 1200 \
+  --curriculum-interval 100 \
+  --episodes 9000 \
+  --steps 360 \
+  --sim-steps-per-action 10 \
   --model-path models/best_curriculum.pth
 
 # Evaluate baseline plus multiple DQN checkpoints
 python src/phase3_eval/evaluate.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flow configs/flow_high_peak.json \
-  --models models/best_single.pth models/best_curriculum.pth \
-  --episodes 50
+  --flows \
+    configs/eval_flows/low_flat_eval.json \
+    configs/eval_flows/medium_flat_eval.json \
+    configs/eval_flows/high_flat_eval.json \
+    configs/eval_flows/low_peak_eval.json \
+    configs/eval_flows/medium_peak_eval.json \
+    configs/eval_flows/high_peak_eval.json \
+  --models \
+    models/best_single.pth \
+    models/best_curriculum.pth \
+  --episodes 50 \
+  --steps 360 \
+  --sim-steps-per-action 10
 
 # Run the batch scripts
 ./run_all_train.sh
@@ -140,7 +156,7 @@ python analysis/plot_training.py
 # Export dashboard replay JSON
 python src/phase4_export/export_replay.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flow configs/flow_high_flat.json \
+  --flow configs/eval_flows/high_flat_eval.json \
   --algorithm baseline \
   --output web/data/high.json
 
@@ -182,10 +198,10 @@ npm run web
 
 | Scenario | Vehicles | File |
 |---|---:|---|
-| Low flat | 300 | `configs/flow_low_flat.json` |
-| Medium flat | 600 | `configs/flow_medium_flat.json` |
-| High flat | 900 | `configs/flow_high_flat.json` |
-| Low peak | 300 | `configs/flow_low_peak.json` |
-| Medium peak | 600 | `configs/flow_medium_peak.json` |
-| High peak | 900 | `configs/flow_high_peak.json` |
+| Low flat | 900 | `configs/eval_flows/low_flat_eval.json` |
+| Medium flat | 3000 | `configs/eval_flows/medium_flat_eval.json` |
+| High flat | 6000 | `configs/eval_flows/high_flat_eval.json` |
+| Low peak | 900 | `configs/eval_flows/low_peak_eval.json` |
+| Medium peak | 3000 | `configs/eval_flows/medium_peak_eval.json` |
+| High peak | 6000 | `configs/eval_flows/high_peak_eval.json` |
 | Gaussian | dataset-defined | `configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json` |

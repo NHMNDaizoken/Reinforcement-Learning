@@ -351,30 +351,38 @@ def main() -> None:
         description="Train shared DQN traffic controller."
     )
 
-    parser.add_argument("--roadnet", default="configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json")
+    parser.add_argument(
+        "--roadnet",
+        default="configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json",
+    )
 
     parser.add_argument(
-        "--flows",
-        nargs="+",
-        default=["configs/flow_medium_flat.json"],
-        help="List of flow config files for curriculum learning.",
+        "--flows-dir",
+        default="configs/",
+        help="Folder chứa các flow config json.",
     )
 
     parser.add_argument(
         "--mode",
         choices=["single", "curriculum", "random"],
-        default="single",
+        default="curriculum",
         help="Training mode.",
     )
 
     parser.add_argument(
         "--curriculum-interval",
         type=int,
-        default=200,
+        default=100,
         help="Number of episodes per curriculum phase.",
     )
 
-    parser.add_argument("--episodes", type=int, default=1200)
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=None,
+        help="Nếu không set, tự tính theo số lượng flow.",
+    )
+
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--sim-steps-per-action", type=int, default=10)
     parser.add_argument("--output-csv", default="data/buffer_dqn.csv")
@@ -382,18 +390,47 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    flow_dir = Path(args.flows_dir)
+
+    flows = sorted(
+        [
+            str(f)
+            for f in flow_dir.glob("*.json")
+            if "roadnet" not in f.name.lower()
+        ]
+    )
+
+    if not flows:
+        raise ValueError(f"Không tìm thấy flow json trong folder: {flow_dir}")
+
+    num_flows = len(flows)
+
+    # Auto scale episodes theo số flow.
+    # Với 30 flow => 30 * 300 = 9000 episodes.
+    episodes = args.episodes if args.episodes is not None else num_flows * 300
+
+    # Không để curriculum interval quá lớn khi có nhiều flow.
+    curriculum_interval = min(args.curriculum_interval, max(50, episodes // num_flows))
+
+    print(f"\n[INFO] Found {num_flows} flow files in: {flow_dir}")
+    print(f"[INFO] Training mode: {args.mode}")
+    print(f"[INFO] Episodes: {episodes}")
+    print(f"[INFO] Curriculum interval: {curriculum_interval}")
+    print("[INFO] Loaded flow files:")
+    for flow in flows:
+        print(" -", flow)
+
     train(
         roadnet_path=args.roadnet,
-        flows=args.flows,
+        flows=flows,
         mode=args.mode,
-        curriculum_interval=args.curriculum_interval,
-        episodes=args.episodes,
+        curriculum_interval=curriculum_interval,
+        episodes=episodes,
         steps_per_episode=args.steps,
         sim_steps_per_action=args.sim_steps_per_action,
         output_csv=args.output_csv,
         model_path=args.model_path,
     )
-
 
 if __name__ == "__main__":
     main()
