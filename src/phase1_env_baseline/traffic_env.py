@@ -112,8 +112,9 @@ class TrafficEnv:
         counts = self.engine.get_lane_vehicle_count()
         rewards = []
         for inter_id in self.inter_ids:
+            # SỬA LỖI Ở ĐÂY: Thêm hàm abs() để lấy giá trị tuyệt đối áp lực của từng luồng
             pressure = sum(
-                counts.get(in_lane, 0) - counts.get(out_lane, 0)
+                abs(counts.get(in_lane, 0) - counts.get(out_lane, 0))
                 for movements in self.phase_map[inter_id]
                 for in_lane, out_lane in movements
             )
