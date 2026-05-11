@@ -122,7 +122,7 @@ class SharedDQNAgent:
     gamma: float = 0.95
     epsilon: float = 1.0
     epsilon_min: float = 0.05
-    epsilon_decay: float = 0.9958
+    epsilon_decay: float = 0.9934  # reaches epsilon_min=0.05 at ~ep 450 of 500
     buffer_capacity: int = 50000
     batch_size: int = 256
     target_update_freq: int = 1000
