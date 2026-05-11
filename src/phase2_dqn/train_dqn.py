@@ -356,7 +356,7 @@ def main() -> None:
     parser.add_argument(
         "--flows",
         nargs="+",
-        default=["configs/flow_medium_flat.json"],
+        default=["configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json"],
         help="List of flow config files for curriculum learning.",
     )
 
@@ -374,11 +374,11 @@ def main() -> None:
         help="Number of episodes per curriculum phase.",
     )
 
-    parser.add_argument("--episodes", type=int, default=1200)
+    parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--sim-steps-per-action", type=int, default=10)
     parser.add_argument("--output-csv", default="data/buffer_dqn.csv")
-    parser.add_argument("--model-path", default="models/best_curriculum.pth")
+    parser.add_argument("--model-path", default="models/best.pth")
 
     args = parser.parse_args()
 

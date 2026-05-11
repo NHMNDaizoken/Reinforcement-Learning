@@ -36,11 +36,23 @@ def _load_roads(roadnet_path: str) -> dict[str, dict]:
     return {road["id"]: road for road in roadnet["roads"]}
 
 
+def _world_bounds(roadnet_path: str) -> tuple[float, float, float, float]:
+    """Return (x_min, x_max, y_min, y_max) from non-virtual intersections."""
+    with Path(roadnet_path).open("r", encoding="utf-8") as file:
+        roadnet = json.load(file)
+    inters = [i for i in roadnet["intersections"] if not i.get("virtual", False)]
+    xs = [float(i["point"]["x"]) for i in inters]
+    ys = [float(i["point"]["y"]) for i in inters]
+    return min(xs), max(xs), min(ys), max(ys)
+
+
 def _vehicle_xy(
     lane_id: str,
     distance: float,
     road_map: dict[str, dict],
     canvas_size: int = 820,
+    x_bounds: tuple[float, float] = (0.0, 600.0),
+    y_bounds: tuple[float, float] = (0.0, 600.0),
 ) -> tuple[float, float, float] | None:
     road_id = lane_id.rsplit("_", 1)[0]
     road = road_map.get(road_id)
@@ -64,10 +76,15 @@ def _vehicle_xy(
     world_x += normal_x * offset
     world_y += normal_y * offset
 
+    # Map world coords to screen using actual world bounds (matches App.tsx worldNodes)
     margin = 170
-    scale = (canvas_size - 2 * margin) / 600
-    screen_x = margin + world_x * scale
-    screen_y = margin + world_y * scale
+    available = canvas_size - 2 * margin  # 480px
+    x_min, x_max = x_bounds
+    y_min, y_max = y_bounds
+    x_scale = available / max(x_max - x_min, 1.0)
+    y_scale = available / max(y_max - y_min, 1.0)
+    screen_x = margin + (world_x - x_min) * x_scale
+    screen_y = margin + (world_y - y_min) * y_scale
     return screen_x, screen_y, angle
 
 
@@ -83,14 +100,21 @@ def _vehicle_type(vehicle_id: str) -> str:
     return "car"
 
 
-def _snapshot_vehicles(engine, road_map: dict[str, dict], max_vehicles: int = 240) -> list[dict]:
+def _snapshot_vehicles(
+    engine,
+    road_map: dict[str, dict],
+    max_vehicles: int = 240,
+    x_bounds: tuple[float, float] = (0.0, 600.0),
+    y_bounds: tuple[float, float] = (0.0, 600.0),
+) -> list[dict]:
     lane_vehicles = engine.get_lane_vehicles()
     distances = engine.get_vehicle_distance()
     speeds = engine.get_vehicle_speed()
     vehicles = []
     for lane_id, vehicle_ids in sorted(lane_vehicles.items()):
         for vehicle_id in vehicle_ids:
-            result = _vehicle_xy(lane_id, float(distances.get(vehicle_id, 0.0)), road_map)
+            result = _vehicle_xy(lane_id, float(distances.get(vehicle_id, 0.0)), road_map,
+                                 x_bounds=x_bounds, y_bounds=y_bounds)
             if result is None:
                 continue
             screen_x, screen_y, angle = result
@@ -140,6 +164,9 @@ def export_replay_data(
     road_map = _load_roads(roadnet_path)
     frames = []
     tracker = _VehicleTracker(TrafficEnv._count_generated_vehicles(flow_path))
+    x_min, x_max, y_min, y_max = _world_bounds(roadnet_path)
+    x_bounds = (x_min, x_max)
+    y_bounds = (y_min, y_max)
 
     # ── BASELINE (MaxPressure) ──────────────────────────────────────────────
     if algorithm == "baseline":
@@ -167,7 +194,7 @@ def export_replay_data(
                 "completion_rate": metrics["completion_rate"],
                 "total_queue": total_queue,
                 "agents": agents,
-                "vehicles": _snapshot_vehicles(engine, road_map),
+                "vehicles": _snapshot_vehicles(engine, road_map, x_bounds=x_bounds, y_bounds=y_bounds),
             })
             engine.next_step()
 
@@ -187,22 +214,21 @@ def export_replay_data(
             raise RuntimeError(f"Cannot load DQN model from {model_path}")
 
         states = env.reset()
-        # FIX: dùng env.engine thay vì tạo engine riêng
         engine = env.engine
         current_actions = {agent_id: 0 for agent_id in env.inter_ids}
 
         for elapsed in range(steps):
+            # Re-query DQN every action_interval steps (same cadence as training)
             if elapsed % action_interval == 0:
                 action_values = agent.select_actions(states, training=False)
                 current_actions = {
                     agent_id: int(action_values[idx])
                     for idx, agent_id in enumerate(env.inter_ids)
                 }
-                next_states, _, done, info = env.step(current_actions)
-                # FIX: cập nhật engine reference sau mỗi step
-                engine = env.engine
-                states = next_states
+                for agent_id, action in current_actions.items():
+                    engine.set_tl_phase(agent_id, action)
 
+            # Capture frame at current second BEFORE advancing
             counts = engine.get_lane_vehicle_count()
             agents, total_queue = _build_agents(counts, phase_map, current_actions)
             metrics = tracker.update(engine)
@@ -217,9 +243,15 @@ def export_replay_data(
                 "completion_rate": metrics["completion_rate"],
                 "total_queue": total_queue,
                 "agents": agents,
-                "vehicles": _snapshot_vehicles(engine, road_map),
+                "vehicles": _snapshot_vehicles(engine, road_map, x_bounds=x_bounds, y_bounds=y_bounds),
             })
-            # FIX: KHÔNG gọi engine.next_step() vì TrafficEnv đã tự step
+
+            # Advance one second and update env internal state
+            env._advance_one_second()
+
+            # Refresh state vector at end of each action interval for next DQN query
+            if (elapsed + 1) % action_interval == 0:
+                states = env._get_states()
 
         algorithm_label = "Trained DQN — Shared Q-Network (9 agents)"
 

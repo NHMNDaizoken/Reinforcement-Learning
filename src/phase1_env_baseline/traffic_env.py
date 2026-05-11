@@ -170,13 +170,33 @@ class TrafficEnv:
             )
         return states
 
+    # def _get_rewards(self) -> list[float]:
+    #     counts = self.engine.get_lane_vehicle_count()
+    #     rewards = []
+    #     for inter_id in self.inter_ids:
+    #         phase = self._current_phases[inter_id]
+    #         pressure = self.phase_pressure(counts, self.phase_map[inter_id], phase)
+    #         rewards.append(-float(abs(pressure)))
+    #     return rewards
     def _get_rewards(self) -> list[float]:
         counts = self.engine.get_lane_vehicle_count()
         rewards = []
         for inter_id in self.inter_ids:
-            phase = self._current_phases[inter_id]
-            pressure = self.phase_pressure(counts, self.phase_map[inter_id], phase)
-            rewards.append(-float(abs(pressure)))
+            # Tính tổng số xe đang kẹt ở TẤT CẢ các làn ĐẦU VÀO của ngã tư
+            queue_length = 0
+            
+            # Sử dụng Set để tránh đếm trùng các làn đầu vào (nếu 1 làn dùng cho nhiều pha)
+            in_lanes = set()
+            for movements in self.phase_map[inter_id]:
+                for in_lane, _ in movements:
+                    in_lanes.add(in_lane)
+            
+            for lane in in_lanes:
+                queue_length += counts.get(lane, 0)
+                
+            # Trừ điểm AI tương đương với số xe đang bị kẹt
+            rewards.append(-float(queue_length))
+            
         return rewards
 
     def _phase_state_dim(self, phases: list[list[tuple[str, str]]]) -> int:

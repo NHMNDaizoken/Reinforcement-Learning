@@ -50,19 +50,21 @@ type ReplayData = {
   frames: Frame[];
 };
 
-type TrafficLevel = "low" | "medium" | "high";
+type TrafficLevel = "low" | "medium" | "high" | "hangzhou";
 type Algorithm = "baseline" | "model";
 
 const replays: Record<TrafficLevel, Partial<Record<Algorithm, ReplayData>>> = {
   low: { baseline: require('./data/low.json'), model: undefined },
   medium: { baseline: require('./data/medium.json'), model: undefined },
-  high: { baseline: require('./data/high.json'), model: require("./data/high_model.json"), },
+  high: { baseline: require('./data/high.json'), model: require("./data/high_model.json") },
+  hangzhou: { baseline: require('./data/hangzhou.json'), model: require("./data/hangzhou_model.json") },
 };
 
 const trafficOptions: { key: TrafficLevel; label: string; detail: string }[] = [
   { key: "low", label: "Low", detail: "300 veh/h" },
   { key: "medium", label: "Medium", detail: "600 veh/h" },
   { key: "high", label: "High", detail: "900 veh/h" },
+  { key: "hangzhou", label: "Hangzhou", detail: "4×4 real-world" },
 ];
 
 const algorithmOptions: { key: Algorithm; label: string }[] = [
@@ -84,7 +86,20 @@ const VEHICLE_WAITING_COLOR: Record<VehicleType, string> = {
   motorbike: "#f97316",
 };
 
-const worldNodes = [170, 410, 650];
+// worldNodes removed — computed dynamically inside TrafficMap from agent data
+
+// One color per phase index (up to 9 phases). Cycles if more.
+const PHASE_COLORS = [
+  "#4ade80", // 0 — green
+  "#60a5fa", // 1 — blue
+  "#fb923c", // 2 — orange
+  "#a78bfa", // 3 — purple
+  "#f472b6", // 4 — pink
+  "#34d399", // 5 — teal
+  "#facc15", // 6 — yellow
+  "#f87171", // 7 — red-pink
+  "#38bdf8", // 8 — sky
+];
 
 export default function App() {
   const { width, height } = useWindowDimensions();
@@ -260,32 +275,45 @@ function TrafficMap({ frame, size }: { frame: Frame; size: number }) {
   const scale = size / 820;
   const toPx = (value: number) => value * scale;
   const roadWidth = 58;
-  const laneWidth = roadWidth / 2;
+
+  // Dynamic grid: compute screen positions from agent row/col values
+  const cols = useMemo(
+    () => [...new Set(frame.agents.map((a) => a.col))].sort((a, b) => a - b),
+    [frame.agents]
+  );
+  const rows = useMemo(
+    () => [...new Set(frame.agents.map((a) => a.row))].sort((a, b) => a - b),
+    [frame.agents]
+  );
+  const margin = 170;
+  const available = 480; // 820 - 2*170
+  const xStep = cols.length > 1 ? available / (cols.length - 1) : 0;
+  const yStep = rows.length > 1 ? available / (rows.length - 1) : 0;
+  const xNodes = useMemo(() => cols.map((_, i) => margin + i * xStep), [cols, xStep]);
+  const yNodes = useMemo(() => rows.map((_, i) => margin + i * yStep), [rows, yStep]);
+  const colToX = useMemo(() => new Map(cols.map((c, i) => [c, xNodes[i]])), [cols, xNodes]);
+  const rowToY = useMemo(() => new Map(rows.map((r, i) => [r, yNodes[i]])), [rows, yNodes]);
 
   return (
     <View style={[styles.map, { width: size, height: size }]}>
-      {/* Roads ngang — FIX: vẽ 2 làn rõ hơn */}
-      {worldNodes.map((y) => (
+      {/* Roads ngang */}
+      {yNodes.map((y) => (
         <View key={`h-${y}`}>
-          {/* đường ngang */}
           <View style={[styles.road, {
             left: -40 * scale,
             top: (y - roadWidth / 2) * scale,
             width: 900 * scale,
             height: roadWidth * scale,
           }]}>
-            {/* vạch giữa */}
             <View style={[styles.centerLineDash, { top: (roadWidth / 2 - 0.5) * scale, height: Math.max(1, scale) }]} />
-            {/* vạch làn trái */}
             <View style={[styles.laneMarker, { top: (roadWidth / 4) * scale, height: Math.max(1, 0.5 * scale) }]} />
-            {/* vạch làn phải */}
             <View style={[styles.laneMarker, { top: (3 * roadWidth / 4) * scale, height: Math.max(1, 0.5 * scale) }]} />
           </View>
         </View>
       ))}
 
-      {/* Roads dọc — FIX: vẽ 2 làn rõ hơn */}
-      {worldNodes.map((x) => (
+      {/* Roads dọc */}
+      {xNodes.map((x) => (
         <View key={`v-${x}`}>
           <View style={[styles.road, {
             left: (x - roadWidth / 2) * scale,
@@ -293,7 +321,6 @@ function TrafficMap({ frame, size }: { frame: Frame; size: number }) {
             width: roadWidth * scale,
             height: 900 * scale,
           }]}>
-            {/* vạch giữa */}
             <View style={[styles.centerLineDash, {
               left: (roadWidth / 2 - 0.5) * scale,
               width: Math.max(1, scale),
@@ -305,7 +332,7 @@ function TrafficMap({ frame, size }: { frame: Frame; size: number }) {
         </View>
       ))}
 
-      {/* FIX: Vehicles với emoji theo loại xe */}
+      {/* Vehicles */}
       {frame.vehicles.map((vehicle) => {
         const type = vehicle.type ?? "car";
         const emoji = VEHICLE_EMOJI[type];
@@ -336,8 +363,8 @@ function TrafficMap({ frame, size }: { frame: Frame; size: number }) {
 
       {/* Intersections */}
       {frame.agents.map((agent) => {
-        const x = worldNodes[agent.col];
-        const y = worldNodes[agent.row];
+        const x = colToX.get(agent.col) ?? 0;
+        const y = rowToY.get(agent.row) ?? 0;
         return (
           <View
             key={agent.id}
@@ -352,20 +379,23 @@ function TrafficMap({ frame, size }: { frame: Frame; size: number }) {
               },
             ]}
           >
-            {/* tín hiệu ngang */}
             <View style={[
-              styles.signalHorizontal,
-              agent.action === 0 ? styles.signalGo : styles.signalStop,
-            ]} />
-            {/* tín hiệu dọc */}
-            <View style={[
-              styles.signalVertical,
-              agent.action === 1 ? styles.signalGo : styles.signalStop,
-            ]} />
-            {/* số xe đang chờ */}
-            <Text style={[styles.queueText, { fontSize: Math.max(10, 15 * scale) }]}>
-              {agent.queue}
-            </Text>
+              styles.phaseRing,
+              {
+                borderColor: PHASE_COLORS[agent.action % PHASE_COLORS.length],
+                borderWidth: Math.max(2, 4 * scale),
+                width: 72 * scale,
+                height: 72 * scale,
+                borderRadius: 36 * scale,
+              },
+            ]}>
+              <Text style={[styles.phaseLabel, { fontSize: Math.max(7, 10 * scale) }]}>
+                P{agent.action}
+              </Text>
+              <Text style={[styles.queueText, { fontSize: Math.max(10, 15 * scale) }]}>
+                {agent.queue}
+              </Text>
+            </View>
           </View>
         );
       })}
@@ -662,33 +692,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  signalHorizontal: {
+  phaseRing: {
     position: "absolute",
-    left: "13%",
-    right: "13%",
-    top: "45%",
-    height: "10%",
-    borderRadius: 2,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  signalVertical: {
-    position: "absolute",
-    top: "13%",
-    bottom: "13%",
-    left: "45%",
-    width: "10%",
-    borderRadius: 2,
-  },
-  signalGo: {
-    backgroundColor: "#4ade80",
-    shadowColor: "#4ade80",
-    shadowOpacity: 0.8,
-    shadowRadius: 4,
-  },
-  signalStop: {
-    backgroundColor: "#f43f5e",
-    shadowColor: "#f43f5e",
-    shadowOpacity: 0.6,
-    shadowRadius: 3,
+  phaseLabel: {
+    color: "#94a3b8",
+    fontWeight: "600",
+    lineHeight: 12,
   },
   queueText: {
     color: "#e2e8f0",

@@ -589,7 +589,28 @@ def main() -> None:
     parser.add_argument("--baseline-csv", default="data/buffer_baseline.csv")
     parser.add_argument("--dqn-csv", default="data/buffer_dqn.csv")
     parser.add_argument("--offline-db", default="data/offline_dataset.db")
+    parser.add_argument("--baseline-only", action="store_true", help="Chỉ chạy MaxPressure baseline, bỏ qua DQN")
     args = parser.parse_args()
+
+    if args.baseline_only:
+        baseline = _run_baseline(
+            roadnet_path=args.roadnet,
+            flow_path=args.flow,
+            episodes=args.episodes,
+            steps_per_episode=args.steps,
+            sim_steps_per_action=args.sim_steps_per_action,
+        )
+        _write_csv(args.baseline_csv, baseline["rows"])
+        print(f"\n{'='*55}")
+        print(f"📊 KẾT QUẢ MAXPRESSURE BASELINE: {Path(args.flow).name}")
+        print(f"{'='*55}")
+        print(f"  ATL:             {float(baseline['atl']):.3f} s")
+        print(f"  Completed:       {float(baseline['completed']):.0f}")
+        print(f"  Active:          {float(baseline['active']):.0f}")
+        print(f"  Generated:       {float(baseline['generated']):.0f}")
+        print(f"  Completion Rate: {float(baseline['completion_rate']):.3f}")
+        print(f"{'='*55}\n")
+        return
 
     results = evaluate_multiple(
         roadnet_path=args.roadnet,
