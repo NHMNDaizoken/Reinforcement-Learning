@@ -33,8 +33,9 @@ The current working tree implements the main audit fixes below:
 - Min-green support was added through action resolution and action masks.
 - Evaluation now runs clearance steps after the decision loop, avoids writing
   clearance transitions, and stores the new metric columns in CSV/SQLite.
-- Flow generation now caps generated synthetic vehicles before 2700s and creates
-  both legacy low/medium/high flows and demand curriculum flows.
+- Flow generation is split between `configs/generate_train_flows.py` for
+  Gaussian training seeds and `configs/generate_eval_benchmarks.py` for
+  low/medium/high flat and peak evaluation flows.
 
 Remaining follow-up:
 
@@ -55,8 +56,8 @@ Remaining follow-up:
 ### Code Locations
 
 - `src/phase1_env_baseline/traffic_env.py`: `step()`, `done` computation.
-- `src/phase3_eval/evaluate.py`: `_run_dqn()`, `_run_baseline()`, `MAX_EVAL_STEPS` loops.
-- `configs/generate_configs.py`: generated flows spawn until `2700s`, while the original Gaussian flow spawns until nearly `3600s`.
+- `src/phase3_eval/evaluate.py`: `_run_dqn()`, `_run_baseline()`, decision and clearance loops.
+- `configs/generate_train_flows.py` and `configs/generate_eval_benchmarks.py`: generated flows are derived from local Gaussian routes; the original Gaussian flow still spawns until nearly `3600s`.
 
 ### Recommended Fix
 
@@ -269,18 +270,22 @@ avg_reward = episode_reward / max(1, actual_steps * env.n_agents)
 
 ### Problems / Risks
 
-- Generated flows only contain 300/600/900 vehicles, while the original Gaussian flow contains around 8412 vehicles. The demand jump is too large.
+- Evaluation benchmark flows contain 900/3000/6000 vehicles, while generated
+  training seeds default to around the Gaussian demand level of 8412 vehicles.
+  Curriculum is now seed-based, but demand-level curriculum is still a useful
+  future extension.
 - Moving from light generated flows to the heavy Gaussian flow can cause distribution shift.
 - Keeping replay from old scenarios is useful, but without scenario tags or stratified sampling, old transitions can add noise.
 
 ### Code Locations
 
 - `src/phase2_dqn/train_dqn.py`: `_select_flow()`.
-- `configs/generate_configs.py`: generated demand levels.
+- `configs/generate_train_flows.py`: Gaussian training seed generation.
+- `configs/generate_eval_benchmarks.py`: flat/peak benchmark generation.
 
 ### Recommended Fix
 
-Increase demand more smoothly:
+For a future demand curriculum, increase demand more smoothly:
 
 ```text
 300 -> 900 -> 1800 -> 3600 -> 6000 -> 8412
@@ -304,7 +309,9 @@ If PER or stratified replay is added, sample old and new scenarios in a controll
 ### Problems
 
 - If a model cannot be loaded, evaluation still runs with untrained weights. The summary can become misleading.
-- `_run_dqn()` and `_run_baseline()` hard-code `MAX_EVAL_STEPS = 720`, making CLI `--steps` ineffective.
+- `_run_dqn()` and `_run_baseline()` now receive `steps_per_episode`; keep CLI
+  examples on `--steps`/`--flows` because `--flow` is not part of the current
+  multi-flow CLI.
 - If clearance steps are written as transitions, the offline dataset is poisoned.
 - Evaluation should be fair between DQN and baseline: same flow, seed, duration, clearance, and metric definitions.
 
@@ -359,20 +366,23 @@ Log end-of-episode metrics in a separate `episode_metrics.csv`.
 
 ### Problems
 
-- `analysis/plot_training.py` says it reads `training_log.csv`, but the code reads `row["reward"]`; the current training log writes `avg_reward`.
-- `tests/phase3/test_evaluate.py` calls `evaluate_module.evaluate(...)`, but the current file exposes `evaluate_multiple(...)`. The test is out of sync with the API.
-- Several CLI defaults point to files that do not exist:
-  - `configs/roadnet.json`
-  - `configs/flow_medium.json`
-  - `models/best.pth`
+- `analysis/plot_training.py` now reads `avg_reward` with a `reward`
+  fallback for older logs.
+- `tests/phase3/test_evaluate.py` can use the backward-compatible
+  `evaluate(...)` wrapper or the newer `evaluate_multiple(...)` API.
+- Some CLI defaults still point to legacy paths:
+  - `evaluate.py --roadnet` defaults to `configs/roadnet.json`
+  - `evaluate.py --flows` defaults to `configs/flow_*`
+  - `max_pressure.py` and `export_replay.py` default to `configs/flow_*`
 
 ### Recommended Fix
 
 - Update the plot script to read `avg_reward`.
-- Update tests for `evaluate_multiple()` or add a backward-compatible `evaluate()` wrapper.
+- Keep tests aligned with either the single-model `evaluate()` wrapper or the
+  multi-model `evaluate_multiple()` API.
 - Default CLI paths should point to:
   - `configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json`
-  - an existing flow under `configs/`
+  - an existing flow under `configs/eval_flows/`
   - a model path that matches the training script output
 
 ## Top 10 Most Serious Issues

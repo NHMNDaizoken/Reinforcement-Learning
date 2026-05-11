@@ -573,16 +573,36 @@ def _print_summary_multi(results: dict[str, object], flow_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate multiple DQNs against MaxPressure and build offline data."
+        description="Evaluate DQNs against MaxPressure on multiple traffic flows."
     )
-    parser.add_argument("--roadnet", default="configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json")
-    parser.add_argument("--flow", default="configs/flow_medium_flat.json")
+
+    parser.add_argument(
+        "--roadnet",
+        default="configs/roadnet.json",
+        help="Roadnet used for both training and evaluation.",
+    )
+
+    parser.add_argument(
+        "--flows",
+        nargs="+",
+        default=[
+            "configs/flow_low_flat.json",
+            "configs/flow_medium_flat.json",
+            "configs/flow_high_flat.json",
+            "configs/flow_low_peak.json",
+            "configs/flow_medium_peak.json",
+            "configs/flow_high_peak.json",
+        ],
+        help="List of flow files to evaluate, PressLight-style.",
+    )
+
     parser.add_argument(
         "--models",
         nargs="+",
         default=["models/best_curriculum.pth"],
-        help="List of model files to test",
+        help="List of trained DQN model files.",
     )
+
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--sim-steps-per-action", type=int, default=10)

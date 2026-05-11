@@ -32,8 +32,11 @@ Implemented changes:
 * Added explicit DQN target-network sync method.
 * Updated training logs, evaluation CSVs, SQLite offline data, replay export JSON,
   plotting, shell commands, and tests to match the new metric schema.
-* Updated config generation to produce both legacy low/medium/high flows and
-  demand curriculum flows, with all generated vehicles spawned before 2700s.
+* Replaced the old config generator with:
+  * `configs/generate_train_flows.py` for Gaussian training seeds in
+    `configs/train_flows/`
+  * `configs/generate_eval_benchmarks.py` for flat/peak benchmark flows in
+    `configs/eval_flows/`
 
 Impact:
 
@@ -75,11 +78,11 @@ pip install . --no-build-isolation
 ## **2. Phase 1 — Environment & Baseline**
 
 * Generated 3×3 grid (9 intersections)
-* Created synthetic traffic flows from the Gaussian dataset routes:
+* Created synthetic benchmark flows from the Gaussian dataset routes:
 
-  * Low flat / peak (300 vehicles)
-  * Medium flat / peak (600 vehicles)
-  * High flat / peak (900 vehicles)
+  * Low flat / peak (900 vehicles)
+  * Medium flat / peak (3000 vehicles)
+  * High flat / peak (6000 vehicles)
 
 Baseline: **MaxPressure**
 
@@ -89,10 +92,11 @@ Baseline: **MaxPressure**
 
 ### Design
 
-* State: `[q_in, q_out, one_hot(phase)]`
-* Reward: `r = -(sum(q_in) - sum(q_out))`
+* State: normalized incoming queues, downstream queues, waiting queues,
+  phase elapsed time, min-green remaining, and one-hot phase.
+* Reward: `r = -abs(pressure(applied_phase))`
 * One shared Q-network for all intersections
-* Supports `single`, `random`, and `curriculum` modes through `--flows`
+* Supports `single`, `random`, and `curriculum` modes through `--flows-dir`
 
 ### Key Fixes
 
@@ -138,8 +142,7 @@ Features:
 
 * Synthetic data only
 * Single-lane roads
-* No peak traffic
-* No real dataset comparison
+* Real-world datasets are not integrated yet
 * Weak generalization
 
 ---
@@ -205,23 +208,23 @@ configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json
 
 ### **2. Peak Traffic Scenario**
 
-Created:
+Created under `configs/eval_flows/`:
 
 ```
-flow_low_peak.json
-flow_medium_peak.json
-flow_high_peak.json
+low_peak_eval.json
+medium_peak_eval.json
+high_peak_eval.json
 ```
 
 Also generated flat variants:
 
 ```
-flow_low_flat.json
-flow_medium_flat.json
-flow_high_flat.json
+low_flat_eval.json
+medium_flat_eval.json
+high_flat_eval.json
 ```
 
-Peak flows place 70% of vehicles between 900s and 1800s.
+Peak flows are sampled from a Gaussian peak centered in the episode.
 
 ---
 
@@ -240,18 +243,17 @@ Peak flows place 70% of vehicles between 900s and 1800s.
 ### **4. Curriculum Learning (Core)**
 
 ```
-0-200     -> low_flat
-200-400   -> low_peak
-400-600   -> medium_flat
-600-800   -> medium_peak
-800-1000  -> high_flat
-1000-1200 -> gaussian
+0-100     -> gaussian_train_seed_001
+100-200   -> gaussian_train_seed_002
+...
+2800-2900 -> gaussian_train_seed_029
+2900-3000 -> gaussian_train_seed_030
 ```
 
 **Implemented:**
 
-* `train_dqn.py` accepts `--flows`
-* `--mode curriculum` unlocks one additional flow every `--curriculum-interval`
+* `train_dqn.py` accepts `--flows-dir`
+* `--mode curriculum` unlocks one additional file every `--curriculum-interval`
 * Current curriculum samples the hardest unlocked flow 75% of the time and old
   unlocked flows 25% of the time
 
@@ -337,13 +339,14 @@ Peak flows place 70% of vehicles between 900s and 1800s.
 ## **VII. Current Commands**
 
 ```bash
-# Regenerate flat/peak flows from the local Gaussian routes
-python configs/generate_configs.py
+# Regenerate training and benchmark flows from the local Gaussian routes
+python configs/generate_train_flows.py
+python configs/generate_eval_benchmarks.py
 
 # Train single Gaussian model
 python src/phase2_dqn/train_dqn.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flows configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json \
+  --flows-dir configs/syn_3x3_gaussian_500_1h \
   --mode single \
   --episodes 500 \
   --model-path models/best_single.pth
@@ -351,16 +354,16 @@ python src/phase2_dqn/train_dqn.py \
 # Train curriculum model
 python src/phase2_dqn/train_dqn.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flows configs/flow_low_flat.json configs/flow_low_peak.json configs/flow_medium_flat.json configs/flow_medium_peak.json configs/flow_high_flat.json configs/syn_3x3_gaussian_500_1h/syn_3x3_gaussian_500_1h.json \
+  --flows-dir configs/train_flows \
   --mode curriculum \
-  --curriculum-interval 200 \
-  --episodes 1200 \
+  --curriculum-interval 100 \
+  --episodes 9000 \
   --model-path models/best_curriculum.pth
 
 # Evaluate baseline + both models
 python src/phase3_eval/evaluate.py \
   --roadnet configs/syn_3x3_gaussian_500_1h/roadnet_3X3.json \
-  --flow configs/flow_high_peak.json \
+  --flows configs/eval_flows/high_peak_eval.json \
   --models models/best_single.pth models/best_curriculum.pth \
   --episodes 50
 ```
